@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private bool _allowClose;
     private bool _applyingConfig;
     private bool _applyingScanResults;
+    private bool _applyingDlssIndicatorState;
     private bool _uiReady;
     private readonly SemaphoreSlim _configSaveLock = new(1, 1);
     private readonly PerformanceDashboardMonitor _dashboardMonitor;
@@ -205,25 +206,132 @@ public partial class MainWindow : Window
         await _sessionTask;
     }
 
-    private void DisplaySettingsButton_Click(object sender, RoutedEventArgs e)
+    private void RefreshDisplaySettingsButton_Click(object sender, RoutedEventArgs e) => RefreshDisplaySettingsPanel();
+
+    private void RefreshDisplaySettingsPanel()
     {
+        RefreshDlssIndicatorState();
+        RefreshGpuDriverDetails();
         if (SimulatorCombo.SelectedItem is not DetectedSimulator detectedSimulator
             || !detectedSimulator.Definition.Id.StartsWith("msfs", StringComparison.OrdinalIgnoreCase))
         {
-            MessageBox.Show("Select Microsoft Flight Simulator 2020 or 2024 first.", "MSFS display settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            ClearDisplaySettingsPanel("Select Microsoft Flight Simulator 2020 or 2024 to read its display and NVIDIA DLSS settings.");
             return;
         }
 
         var settings = MsfsDisplaySettingsReader.ReadForSimulator(detectedSimulator.Definition.Id);
         if (settings is null)
         {
-            MessageBox.Show("The selected simulator's UserCfg.opt could not be found or read. Start MSFS once and close it normally so the settings file is written.",
-                "MSFS display settings", MessageBoxButton.OK, MessageBoxImage.Information);
+            ClearDisplaySettingsPanel("UserCfg.opt could not be found or read. Start MSFS once and close it normally, then select Refresh Settings.");
             return;
         }
 
         var nvidia = NvidiaDlssSettingsReader.Read(detectedSimulator.Definition.Id);
-        new DisplaySettingsWindow(settings, nvidia) { Owner = this }.ShowDialog();
+        SetDisplayMode(settings.Desktop, nvidia.DlssLibraryVersion, DisplayDesktopRenderingText, DisplayDesktopDlssText);
+        SetDisplayMode(settings.Vr, nvidia.DlssLibraryVersion, DisplayVrRenderingText, DisplayVrDlssText);
+        SetDisplayPreset(nvidia.FrameGeneration, DisplayFgNameText, DisplayFgValueText, DisplayFgSourceText);
+        SetDisplayPreset(nvidia.SuperResolution, DisplaySrNameText, DisplaySrValueText, DisplaySrSourceText);
+        SetDisplayPreset(nvidia.RayReconstruction, DisplayRrNameText, DisplayRrValueText, DisplayRrSourceText);
+        DisplayNvidiaProfileText.Text = "PROFILE  /  " + nvidia.Profile;
+        DisplayDlssVersionText.Text = "LOADED DLSS LIBRARY  /  " + nvidia.DlssLibraryVersion;
+        DisplayConfigVersionText.Text = "USERCFG VERSION  /  " + settings.UserConfigVersion;
+        DisplayConfigPathText.Text = "USERCFG.OPT  /  " + settings.ConfigPath;
+        DisplayConfigPathText.ToolTip = settings.ConfigPath;
+        DisplayNvidiaStatusText.Text = nvidia.Status;
+        DisplaySettingsStatusText.Text = $"SETTINGS READ  /  {detectedSimulator.Name}  /  {DateTime.Now:t}";
+    }
+
+    private void RefreshGpuDriverDetails()
+    {
+        var drivers = GpuDriverInfoReader.Read();
+        if (drivers.Count == 0)
+        {
+            DisplayGpuText.Text = "GPU  /  NVIDIA or AMD display adapter not detected";
+            DisplayGpuDriverText.Text = "DRIVER  /  —";
+            return;
+        }
+
+        DisplayGpuText.Text = "GPU  /  " + string.Join("  |  ", drivers.Select(driver => driver.Name));
+        DisplayGpuDriverText.Text = "DRIVER  /  " + string.Join("  |  ", drivers.Select(driver =>
+            driver.Vendor.Equals("NVIDIA", StringComparison.OrdinalIgnoreCase)
+                ? $"NVIDIA {driver.DisplayVersion} (Windows {driver.InstalledVersion}) / {driver.DriverDate}"
+                : $"AMD {driver.DisplayVersion} / {driver.DriverDate}"));
+        DisplayGpuText.ToolTip = DisplayGpuText.Text;
+        DisplayGpuDriverText.ToolTip = DisplayGpuDriverText.Text;
+    }
+
+    private void RefreshDlssIndicatorState() => SetDlssIndicatorState(NvidiaDlssIndicator.Read());
+
+    private void SetDlssIndicatorState(NvidiaDlssIndicatorState state, string? overrideStatus = null)
+    {
+        _applyingDlssIndicatorState = true;
+        try
+        {
+            DisplayDlssIndicatorCheck.IsChecked = state.Enabled;
+            DisplayDlssIndicatorCheck.Content = state.Enabled ? "OVERLAY / ON" : "OVERLAY / OFF";
+            DisplayDlssIndicatorCheck.IsEnabled = state.Available && AdminService.IsAdministrator();
+            DisplayDlssIndicatorStatusText.Text = overrideStatus ?? state.Status
+                + (state.Available && !AdminService.IsAdministrator()
+                    ? " Run VR Auto-Optimizer as administrator to change it."
+                    : string.Empty);
+        }
+        finally
+        {
+            _applyingDlssIndicatorState = false;
+        }
+    }
+
+    private void DisplayDlssIndicatorCheck_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_applyingDlssIndicatorState || !_uiReady) return;
+        var enable = DisplayDlssIndicatorCheck.IsChecked == true;
+        try
+        {
+            var state = NvidiaDlssIndicator.SetEnabled(enable);
+            SetDlssIndicatorState(state);
+            AppendStatus($"NVIDIA DLSS information overlay set to {(enable ? "ON" : "OFF")} globally.");
+        }
+        catch (Exception exception)
+        {
+            var current = NvidiaDlssIndicator.Read();
+            SetDlssIndicatorState(current, "DLSS information overlay could not be changed: " + exception.Message);
+            AppendStatus("DLSS information overlay could not be changed: " + exception.Message);
+        }
+    }
+
+    private void ClearDisplaySettingsPanel(string status)
+    {
+        DisplaySettingsStatusText.Text = status;
+        DisplayDesktopRenderingText.Text = "—";
+        DisplayDesktopDlssText.Text = "DLSS MODE  /  —";
+        DisplayVrRenderingText.Text = "—";
+        DisplayVrDlssText.Text = "DLSS MODE  /  —";
+        DisplayNvidiaProfileText.Text = "PROFILE  /  —";
+        DisplayDlssVersionText.Text = "LOADED DLSS LIBRARY  /  —";
+        DisplayConfigVersionText.Text = "USERCFG VERSION  /  —";
+        DisplayConfigPathText.Text = "USERCFG.OPT  /  —";
+        DisplayNvidiaStatusText.Text = string.Empty;
+        foreach (var text in new[] { DisplayFgValueText, DisplayFgSourceText, DisplaySrValueText, DisplaySrSourceText, DisplayRrValueText, DisplayRrSourceText })
+            text.Text = "—";
+    }
+
+    private static void SetDisplayMode(MsfsGraphicsDisplaySetting setting, string dlssLibraryVersion,
+        System.Windows.Controls.TextBlock renderingText, System.Windows.Controls.TextBlock dlssText)
+    {
+        var dlss = setting.AntiAliasing.Equals("DLSS", StringComparison.OrdinalIgnoreCase)
+            ? setting.DlssMode
+            : $"NOT ACTIVE / SAVED {setting.DlssMode}";
+        renderingText.Text = NvidiaDlssSettingsReader.FormatRenderingLabel(setting.AntiAliasing, dlssLibraryVersion);
+        dlssText.Text = "DLSS MODE  /  " + dlss;
+    }
+
+    private static void SetDisplayPreset(NvidiaDlssPresetSetting setting,
+        System.Windows.Controls.TextBlock nameText, System.Windows.Controls.TextBlock valueText,
+        System.Windows.Controls.TextBlock sourceText)
+    {
+        nameText.Text = setting.Name.ToUpperInvariant();
+        valueText.Text = setting.Value;
+        sourceText.Text = setting.Source;
     }
 
     private IReadOnlyList<PreflightItem> BuildPlannedActionItems(SimulatorDefinition simulator)
@@ -683,6 +791,8 @@ public partial class MainWindow : Window
     {
         UpdateSimulatorOptionAvailability();
         MarkProfileDirty();
+        if (MainTabs is not null && ReferenceEquals(MainTabs.SelectedItem, DisplaySettingsTab))
+            RefreshDisplaySettingsPanel();
     }
 
     private void UpdateSimulatorOptionAvailability()
@@ -849,8 +959,15 @@ public partial class MainWindow : Window
 
     private void MainTabs_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
-        if (!ReferenceEquals(e.OriginalSource, MainTabs) || !ReferenceEquals(MainTabs.SelectedItem, DashboardTab)) return;
-        Dispatcher.BeginInvoke(() => DashboardScroll.ScrollToTop());
+        if (!ReferenceEquals(e.OriginalSource, MainTabs)) return;
+        if (ReferenceEquals(MainTabs.SelectedItem, DashboardTab))
+            Dispatcher.BeginInvoke(() => DashboardScroll.ScrollToTop());
+        else if (ReferenceEquals(MainTabs.SelectedItem, DisplaySettingsTab))
+            Dispatcher.BeginInvoke(() =>
+            {
+                DisplaySettingsScroll.ScrollToTop();
+                RefreshDisplaySettingsPanel();
+            });
     }
 
     private void UpdateDashboard(PerformanceTelemetrySample sample)

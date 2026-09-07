@@ -38,10 +38,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MSFS 2024 FastLaunch plans", TestMsfs2024FastLaunchAsync),
     ("Bundled OpenXR Turbo layer", TestOpenXrTurboLayerAsync),
     ("VR runtime shutdown policy", TestVrRuntimeShutdownPolicyAsync),
-    ("Xbox post-flight cleanup", TestXboxSessionCleanupAsync),
+    ("Xbox post-flight online stack preservation", TestXboxSessionCleanupAsync),
     ("Performance telemetry calculations", TestPerformanceTelemetryAsync),
     ("MSFS display settings parser", TestMsfsDisplaySettingsParserAsync),
     ("NVIDIA DLSS model preset mapping", TestNvidiaDlssPresetMappingAsync),
+    ("NVIDIA DLSS information overlay values", TestNvidiaDlssIndicatorValuesAsync),
     ("Performance monitor sampling", TestPerformanceMonitorSamplingAsync),
     ("VR toolbar telemetry bridge", TestToolbarTelemetryBridgeAsync),
     ("VR toolbar package installer", TestToolbarPackageInstallerAsync),
@@ -1069,6 +1070,28 @@ static Task TestNvidiaDlssPresetMappingAsync()
     Equal("Preset A", NvidiaDlssSettingsReader.FormatPreset(1, 1));
     Equal("Preset K", NvidiaDlssSettingsReader.FormatPreset(1, 11));
     Equal("Preset Z", NvidiaDlssSettingsReader.FormatPreset(1, 26));
+    Equal("DLSS v310.9.0", NvidiaDlssSettingsReader.FormatRenderingLabel("DLSS", "310.9.0.0"));
+    Equal("DLSS v310.9.1.2", NvidiaDlssSettingsReader.FormatRenderingLabel("DLSS", "310.9.1.2"));
+    Equal("DLSS", NvidiaDlssSettingsReader.FormatRenderingLabel("DLSS", "Not loaded / start MSFS to read"));
+    Equal("TAA", NvidiaDlssSettingsReader.FormatRenderingLabel("TAA", "310.9.0.0"));
+    Equal("310.9.0", NvidiaDlssSettingsReader.ParseNgxDlssVersion(new[]
+    {
+        "[dlss_override]", "app_E658700 = 310.7.129", "[dlss]",
+        "app_B9CF688 = 2.2.15", "app_E658700 = 310.9.0", "[dlssg]", "app_E658700 = 310.9.0"
+    }));
+    Equal("616.64", GpuDriverInfoReader.FormatDriverVersion("NVIDIA", "32.0.16.1664"));
+    Equal("32.0.21025.1006", GpuDriverInfoReader.FormatDriverVersion("AMD", "32.0.21025.1006"));
+    return Task.CompletedTask;
+}
+
+static Task TestNvidiaDlssIndicatorValuesAsync()
+{
+    Equal((uint)1024, NvidiaDlssIndicator.EnabledValue);
+    Equal((uint)0, NvidiaDlssIndicator.DisabledValue);
+    True(NvidiaDlssIndicator.IsEnabledValue(NvidiaDlssIndicator.EnabledValue));
+    True(!NvidiaDlssIndicator.IsEnabledValue(NvidiaDlssIndicator.DisabledValue));
+    Equal(@"SOFTWARE\NVIDIA Corporation\Global\NGXCore", NvidiaDlssIndicator.RegistryPath);
+    Equal("ShowDlssIndicator", NvidiaDlssIndicator.RegistryValueName);
     return Task.CompletedTask;
 }
 
@@ -1109,16 +1132,12 @@ static async Task TestXboxSessionCleanupAsync()
 {
     var directory = Path.Combine(AppContext.BaseDirectory, "test-data", Guid.NewGuid().ToString("N"));
     var messages = new List<string>();
-    var cleanup = new XboxSessionCleanup(
-        new FileLogger(Path.Combine(directory, "xbox-cleanup.log")),
-        applicationNames: []);
+    var cleanup = new XboxSessionCleanup(new FileLogger(Path.Combine(directory, "xbox-cleanup.log")));
     cleanup.StatusChanged += messages.Add;
 
     await cleanup.CleanupAsync();
 
-    True(!XboxSessionCleanup.DefaultApplicationNames.Contains("GamingServices", StringComparer.OrdinalIgnoreCase));
-    True(!XboxSessionCleanup.DefaultApplicationNames.Contains("GamingServicesNet", StringComparer.OrdinalIgnoreCase));
-    True(messages.Any(message => message.Contains("services were left untouched", StringComparison.Ordinal)));
+    True(messages.Any(message => message.Contains("No Xbox process or service was terminated", StringComparison.Ordinal)));
 }
 
 static async Task TestPendingLaunchRoundtripAsync()

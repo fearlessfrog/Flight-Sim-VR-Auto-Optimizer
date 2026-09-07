@@ -240,9 +240,6 @@
                             <TextBlock Text="PERFORMANCE PANEL" Style="{StaticResource InstrumentLabel}" Margin="0,0,0,9"/>
                             <TextBlock Text="OPTIMIZATION PROFILE" Style="{StaticResource InstrumentLabel}" Margin="0,3,0,6" />
                             <ComboBox x:Name="ProfileCombo" Height="34" SelectionChanged="ProfileCombo_SelectionChanged" />
-                            <Button Content="READ DISPLAY / DLSS SETTINGS" Click="DisplaySettingsButton_Click" Margin="0,10,0,3"
-                                    Padding="10,7" Background="#233137" Foreground="{StaticResource CyanBrush}"
-                                    ToolTip="Shows the saved MSFS 2D/VR TAA or DLSS mode, the NVIDIA App DLSS override model presets, and the loaded DLSS library version." />
                             <CheckBox x:Name="PowerPlanCheck" Content="POWER PLAN / CPU-aware temporary" IsChecked="True"
                                       Checked="ProfileSetting_Changed" Unchecked="ProfileSetting_Changed"
                                       ToolTip="Uses Windows Balanced on AMD X3D processors for cache-aware CCD scheduling. Other supported processors use a temporary Ultimate Performance plan. The original plan is restored after the flight." />
@@ -300,6 +297,91 @@
                         </ScrollViewer>
                     </Border>
                 </Grid>
+            </TabItem>
+            <TabItem x:Name="DisplaySettingsTab" Header="DISPLAY / DLSS">
+                <ScrollViewer x:Name="DisplaySettingsScroll" Background="#0C1214" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="16">
+                        <Border Style="{StaticResource PanelFrame}" Padding="14" Margin="0,0,0,12">
+                            <DockPanel>
+                                <StackPanel>
+                                    <TextBlock Text="MSFS DISPLAY / NVIDIA DLSS SETTINGS" Style="{StaticResource InstrumentLabel}" />
+                                    <TextBlock x:Name="DisplaySettingsStatusText" Text="Select this tab to read the current settings."
+                                               Margin="0,6,0,0" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button DockPanel.Dock="Right" Content="REFRESH SETTINGS" Click="RefreshDisplaySettingsButton_Click"
+                                        Margin="18,0,0,0" Padding="14,7" VerticalAlignment="Center"
+                                        Background="#233137" Foreground="{StaticResource CyanBrush}" />
+                            </DockPanel>
+                        </Border>
+
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Style="{StaticResource PanelFrame}" Padding="16">
+                                <StackPanel>
+                                    <TextBlock Text="2D DISPLAY" Style="{StaticResource InstrumentLabel}" />
+                                    <TextBlock x:Name="DisplayDesktopRenderingText" Text="—" Margin="0,12,0,0" FontFamily="Consolas" FontSize="22" FontWeight="Bold" Foreground="{StaticResource CyanBrush}" />
+                                    <TextBlock x:Name="DisplayDesktopDlssText" Text="DLSS MODE  /  —" Margin="0,9,0,0" FontFamily="Consolas" />
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="2" Style="{StaticResource PanelFrame}" Padding="16">
+                                <StackPanel>
+                                    <TextBlock Text="VR DISPLAY" Style="{StaticResource InstrumentLabel}" />
+                                    <TextBlock x:Name="DisplayVrRenderingText" Text="—" Margin="0,12,0,0" FontFamily="Consolas" FontSize="22" FontWeight="Bold" Foreground="{StaticResource GreenBrush}" />
+                                    <TextBlock x:Name="DisplayVrDlssText" Text="DLSS MODE  /  —" Margin="0,9,0,0" FontFamily="Consolas" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+
+                        <Border Style="{StaticResource PanelFrame}" Padding="16" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/><ColumnDefinition Width="190"/></Grid.ColumnDefinitions>
+                                <TextBlock Grid.ColumnSpan="3" Text="GPU DRIVER / NVIDIA APP / DLSS MODEL PRESETS" Style="{StaticResource InstrumentLabel}" />
+                                <TextBlock Grid.Row="1" Grid.ColumnSpan="3" x:Name="DisplayNvidiaProfileText" Text="PROFILE  /  —" Margin="0,7,0,11" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBlock Grid.Row="2" Grid.ColumnSpan="3" x:Name="DisplayGpuText" Text="GPU  /  —" FontFamily="Consolas" FontWeight="Bold" Foreground="{StaticResource CyanBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Row="3" Grid.ColumnSpan="3" x:Name="DisplayGpuDriverText" Text="DRIVER  /  —" Margin="0,7,0,12" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Grid.Row="4" x:Name="DisplayFgNameText" Text="FRAME GENERATION" FontFamily="Consolas" FontWeight="Bold" />
+                                <TextBlock Grid.Row="4" Grid.Column="1" x:Name="DisplayFgValueText" Text="—" FontFamily="Consolas" Foreground="{StaticResource GreenBrush}" />
+                                <TextBlock Grid.Row="4" Grid.Column="2" x:Name="DisplayFgSourceText" Text="—" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBlock Grid.Row="5" x:Name="DisplaySrNameText" Text="SUPER RESOLUTION" Margin="0,10,0,0" FontFamily="Consolas" FontWeight="Bold" />
+                                <TextBlock Grid.Row="5" Grid.Column="1" x:Name="DisplaySrValueText" Text="—" Margin="0,10,0,0" FontFamily="Consolas" Foreground="{StaticResource GreenBrush}" />
+                                <TextBlock Grid.Row="5" Grid.Column="2" x:Name="DisplaySrSourceText" Text="—" Margin="0,10,0,0" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBlock Grid.Row="6" x:Name="DisplayRrNameText" Text="RAY RECONSTRUCTION" Margin="0,10,0,0" FontFamily="Consolas" FontWeight="Bold" />
+                                <TextBlock Grid.Row="6" Grid.Column="1" x:Name="DisplayRrValueText" Text="—" Margin="0,10,0,0" FontFamily="Consolas" Foreground="{StaticResource GreenBrush}" />
+                                <TextBlock Grid.Row="6" Grid.Column="2" x:Name="DisplayRrSourceText" Text="—" Margin="0,10,0,0" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource PanelFrame}" Padding="16" Margin="0,0,0,12">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="IN-SIMULATOR DLSS INFORMATION" Style="{StaticResource InstrumentLabel}" />
+                                    <TextBlock x:Name="DisplayDlssIndicatorStatusText" Text="Reading NVIDIA overlay state…"
+                                               Margin="0,7,18,0" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Shows the active DLSS version, rendering API and preset information inside the simulator. This is a global NVIDIA setting and remains selected until switched off. Enable it before starting MSFS."
+                                               Margin="0,7,18,0" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <CheckBox x:Name="DisplayDlssIndicatorCheck" Grid.Column="1" Content="OVERLAY / OFF"
+                                          VerticalAlignment="Center" FontFamily="Consolas" FontWeight="Bold"
+                                          Checked="DisplayDlssIndicatorCheck_Changed" Unchecked="DisplayDlssIndicatorCheck_Changed"
+                                          ToolTip="Changes only NVIDIA's global ShowDlssIndicator registry value: 1024 for On or 0 for Off. Administrator access is required." />
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource PanelFrame}" Padding="16">
+                            <StackPanel>
+                                <TextBlock Text="VERSION / SOURCE" Style="{StaticResource InstrumentLabel}" />
+                                <TextBlock x:Name="DisplayDlssVersionText" Text="LOADED DLSS LIBRARY  /  —" Margin="0,8,0,0" FontFamily="Consolas" />
+                                <TextBlock x:Name="DisplayConfigVersionText" Text="USERCFG VERSION  /  —" Margin="0,7,0,0" FontFamily="Consolas" />
+                                <TextBlock x:Name="DisplayConfigPathText" Text="USERCFG.OPT  /  —" Margin="0,7,0,0" FontFamily="Consolas" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock x:Name="DisplayNvidiaStatusText" Margin="0,9,0,0" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                                <TextBlock Text="MSFS mode is read from UserCfg.opt. NVIDIA override values are read from the active driver profile. This page is read-only."
+                                           Margin="0,8,0,0" Foreground="{StaticResource MutedTextBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
             </TabItem>
             <TabItem Header="ADVANCED">
                 <ScrollViewer Background="#0C1214" VerticalScrollBarVisibility="Auto">

@@ -30,14 +30,15 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 - CPU vendor/model and topology detection with AMD X3D-safe scheduling, Windows Balanced power handling, and Game Bar protection
 - Selectable simulator priority and optional Intel hybrid performance-core CPU Sets
 - CPU-aware power handling: Windows Balanced for AMD X3D, temporary Ultimate Performance for other supported CPUs, plus NVIDIA persistence control
-- Automatic post-flight Xbox/Game Bar interface cleanup for MSFS while leaving Gaming Services, authentication, game-save and networking services available for the next launch
+- Post-flight Xbox online-stack preservation for MSFS: Xbox, Game Bar, Gaming Services, authentication, game-save and networking components are not terminated
 - Standard profile includes DNS flush, High process priority, and vendor-aware CPU Sets; service stopping is reserved for Aggressive mode
 - Aggressive profile adds reversible Game Bar/Game DVR, fullscreen-optimization, timer-resolution, process power-throttling, standby-memory clearing, and approved service control
 - Optional one-time standby-memory clearing in Aggressive mode
 - Clear **Recommend**, **Keep Running**, and **Protected** application and service guidance; automatic selection uses only verified recommended items
 - Optional online guidance catalogue with local executable identity checks using file metadata, publisher, product, Authenticode signature, and SHA-256
 - Manual **Check Update** control that compares the installed version with the latest public GitHub release and offers to open the official release page
-- Read-only display-settings dialog showing saved MSFS desktop/VR TAA or DLSS mode, NVIDIA App DLSS override model presets for Frame Generation, Super Resolution and Ray Reconstruction, plus the loaded DLSS library version
+- Dedicated read-only Display / DLSS tab showing saved MSFS desktop/VR TAA or DLSS mode, the active DLSS runtime version, NVIDIA App model presets, and installed NVIDIA or AMD GPU driver details
+- Administrator-controlled NVIDIA DLSS information overlay switch on the Display / DLSS tab, using NVIDIA's documented global indicator value so the active DLSS version and preset information can be verified inside MSFS
 - Protected Steam, Xbox/MSFS, VR/OpenXR, networking, security, and flight-control components
 - Content Creator Mode for OBS, Streamlabs, Stream Deck, NVIDIA Broadcast, Voicemeeter, Elgato, and other capture tools
 - Aviation instrument-themed dark interface with live session status and rotating logs
@@ -168,13 +169,22 @@ The test runner has no third-party test framework dependency. It covers output p
 
 Licensed under the [MIT License](LICENSE).
 
+## Release notes — 2.3.0
+
+- Replaced the separate display-settings dialog with a dedicated **Display / DLSS** tab and one-click refresh.
+- Added saved 2D and VR TAA/DLSS modes, NVIDIA App Frame Generation, Super Resolution and Ray Reconstruction model presets, and accurate active NGX/DLSS runtime-version reporting.
+- Added an administrator-controlled NVIDIA in-simulator DLSS information overlay switch for checking the live version, rendering API and preset inside MSFS.
+- Added installed NVIDIA and AMD GPU identification, driver version and driver date to the Display / DLSS panel.
+- Preserved the complete Xbox, Game Bar, Gaming Services, authentication, game-save and networking stack after MSFS exits to prevent the optimizer from disrupting live weather on the next launch.
+- Improved protected-process handling and expanded automated coverage for DLSS runtime metadata, driver-version formatting, overlay values and Xbox online-stack preservation; all 50 tests pass.
+
 ## Release notes — 2.2.1
 
 - Added a manual **Check Update** control that compares the installed version with the latest public GitHub release and only opens GitHub after user approval.
 - Added a read-only **MSFS Display & NVIDIA DLSS Settings** window for saved desktop/VR rendering modes, NVIDIA App model-preset overrides, and the loaded DLSS library version.
 - Improved dashboard source handling by checking loaded SimConnect libraries before using the safe PresentMon fallback.
 - Clarified degraded telemetry states so the dashboard explicitly shows when CPU, MainThread, and memory monitoring remain active while FPS is unavailable.
-- Changed post-flight Xbox cleanup to close only Xbox/Game Bar interface processes, leaving Gaming Services, authentication, game-save, and networking services available for the next MSFS launch.
+- Removed forced post-flight Xbox/Game Bar process termination so the complete authentication and online-services stack remains available for the next MSFS launch.
 - Expanded automated coverage for update checking, display-settings parsing, DLSS preset mapping, FPS status reporting, and Xbox cleanup safety.
 
 ## Release notes — 2.2.0
@@ -214,7 +224,7 @@ Licensed under the [MIT License](LICENSE).
 - Strengthened recovery with a durable transaction journal, verified per-item restoration report, automatic interrupted-session recovery, log rotation, and recovery shortcuts.
 - Changed post-flight application handling so selected applications remain closed, while OneDrive is explicitly and safely restored to the normal desktop session.
 - Added AMD X3D-aware Windows Balanced handling, post-launch power-plan verification, Process Lasso controller shutdown before plan selection, scheduler-safe CPU behavior, and Xbox Game Bar protection.
-- Added automatic post-flight Xbox interface cleanup. Gaming Services and Xbox authentication/network services now remain untouched so online features are ready for the next MSFS launch.
+- Preserved the complete Xbox/Game Bar and Gaming Services stack after MSFS exits so online features remain available for the next launch.
 - Improved Intel hybrid CPU Set selection and verification, processor-group support, process priority, power-throttling restoration, and AMD CCD-aware monitoring.
 - Added graceful SteamVR shutdown so Bluetooth base stations can enter standby, plus safer Pimax, Virtual Desktop, OpenXR, flight-control, security, and simulator-companion protection.
 - Added MSFS 2024 `-FastLaunch`, ten simulator configurations including standalone Korea. IL-2 Series, two optimization profiles, granular controls, five-stage progress, Content Creator Mode, and configurable VR runtime launching.
