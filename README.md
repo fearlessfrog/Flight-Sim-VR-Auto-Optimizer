@@ -11,7 +11,7 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 
 - Automatic detection of ten MSFS, DCS World, X-Plane, and IL-2 configurations
 - Standard and Aggressive optimization profiles with editable granular controls
-- Named user profiles save the simulator, workflow, VR runtime, optimization toggles, application/service checkboxes, and custom app lists
+- Named user profiles save the simulator, workflow, VR runtime, optimization toggles, application/service checkboxes, and custom app lists, with import/export, duplicate/rename, optional simulator/aircraft/headset/monitor associations, and exact saved-versus-current differences
 - Manual checkbox control or an Automatic session workflow
 - Pre-flight safety checklist for access level, simulator target, VR runtime, recovery state, protected components, and stop selections
 - Configurable Virtual Desktop, Pimax Play, SteamVR, or no-runtime launching
@@ -20,6 +20,9 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 - Optional OpenXR Turbo frame-pacing layer, bundled with VR Auto-Optimizer and transactionally registered only for the flight session; OpenXR Toolkit is not required
 - Live five-stage Prepare, Optimize, VR Runtime, Simulator, and Restore pipeline
 - Live performance dashboard with simulator FPS, frame time, average and 1% low FPS, system/simulator CPU, compact processor-load summaries, MainThread timing, memory, spike detection, stutter detection, and optional CSV logging
+- One-click privacy-scrubbed support package containing configuration, detected workloads, CPU/GPU/OpenXR details, driver versions, restoration results, performance history, logs, and recent telemetry
+- Safer workload controls with service dependency/dependent visibility, selection and pre-flight dependency warnings, application restart-command warnings, and an explicit Test Restart action
+- Automatic flight-session history with latest-versus-previous comparisons and FPS/1% low trend graphs, including MainThread time, stutters, CPU spikes, simulator version, GPU driver and profile-change markers
 - Movable MSFS 2024 in-simulator VR toolbar dashboard with the same live metrics, graphs, AMD CCD0/CCD1 load summaries, and spike/stutter counters over a loopback-only read-only connection
 - Persistent custom process kill rules; applications stopped for a flight remain closed during restoration
 - In-app custom-list instructions and non-saving examples for process names and optional restart paths
@@ -36,9 +39,14 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 - Optional one-time standby-memory clearing in Aggressive mode
 - Clear **Recommend**, **Keep Running**, and **Protected** application and service guidance; automatic selection uses only verified recommended items
 - Optional online guidance catalogue with local executable identity checks using file metadata, publisher, product, Authenticode signature, and SHA-256
-- Manual **Check Update** control that compares the installed version with the latest public GitHub release and offers to open the official release page
+- Verified in-app updates that download only official GitHub installer assets accompanied by a matching SHA-256 checksum; releases without both files fall back to the release page
+- Simple freeware release pipeline that builds the Windows installer and publishes a matching SHA-256 checksum without requiring a paid signing certificate
+- Windows installer with Start Menu/optional desktop shortcuts and a clean uninstaller that removes recovery shortcuts and the recognized MSFS toolbar package, with an optional prompt to remove saved data
 - Dedicated read-only Display / DLSS tab showing saved MSFS desktop/VR TAA or DLSS mode, the active DLSS runtime version, NVIDIA App model presets, and installed NVIDIA or AMD GPU driver details
+- Read-only display recommendations based on the latest matching monitored flight, including likely CPU/graphics balance, DLSS mode, render-scaling and stable frame-rate target guidance, with explicit timestamped `UserCfg.opt` backup
 - Administrator-controlled NVIDIA DLSS information overlay switch on the Display / DLSS tab, using NVIDIA's documented global indicator value so the active DLSS version and preset information can be verified inside MSFS
+- VR runtime diagnostics covering selected-runtime launcher availability, selected-versus-active runtime alignment, registered OpenXR runtime, manifest/API version, running components, implicit API layers, environment overrides, and SteamVR display settings when available
+- MSFS online-services health checks for the official MSFS 2024 Live Weather, Live Traffic, Multiplayer and Online Services states, local network availability, Microsoft/Xbox DNS resolution and Xbox support-service readiness, plus a conservative DNS/service-start repair
 - Protected Steam, Xbox/MSFS, VR/OpenXR, networking, security, and flight-control components
 - Content Creator Mode for OBS, Streamlabs, Stream Deck, NVIDIA Broadcast, Voicemeeter, Elgato, and other capture tools
 - Aviation instrument-themed dark interface with live session status and rotating logs
@@ -46,11 +54,18 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 
 ## Install
 
-1. Download the latest Windows x64 package from [Releases](https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/latest).
-2. Extract the entire ZIP to a writable folder.
-3. Install the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0) if it is not already installed.
-4. For Standard use, run `SimVROptimizer.exe` normally. For Aggressive use, right-click it and select **Run as administrator**.
-5. Approve the Windows administrator prompt, select a detected simulator and session workflow, then choose **Start Flight Session**. Close the simulator normally to trigger restoration.
+1. Download `VR-Auto-Optimizer-<version>-Setup.exe` and its `.sha256` file from [Releases](https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/latest).
+2. Run the installer. It installs the self-contained Windows x64 application, Start Menu shortcut and optional desktop shortcut; a separate .NET runtime is not required.
+3. For Standard use, run VR Auto-Optimizer normally. For Aggressive use, approve the Windows administrator prompt.
+4. Select a detected simulator and session workflow, then choose **Start Flight Session**. Close the simulator normally to trigger restoration.
+
+The installer is unsigned freeware, so Windows may display an **Unknown publisher** or SmartScreen warning. Confirm that the installer came from the official GitHub release and that its SHA-256 matches the published `.sha256` file. The in-app updater performs this checksum validation automatically.
+
+The uninstaller removes installed program files, shortcuts, recovery shortcuts and any recognized VR Dashboard package. It asks separately before deleting profiles, logs, performance history and recovery data.
+
+### Release build
+
+`scripts/Build-Release.ps1` creates the self-contained executable, builds the Inno Setup installer and writes the matching `.sha256` file. No certificate or signing secrets are required.
 
 ### MSFS 2024 VR toolbar dashboard
 
@@ -125,7 +140,7 @@ The Custom Apps tab stores process names in `config.json`. Optional restart entr
 
 ### Saved user profiles
 
-The Flight Profile tab can store multiple named setups. Configure the simulator, workflow, optimization options, application/service checkboxes, application **After Flight** actions, VR runtime, online-guidance preference, and custom app lists; type a name in **Saved User Profile**, then select **Save Changes**. Choose that name and select **Load** on a later run to restore the complete setup and rescan the PC. The profile status clearly reports **Saved** or **Modified**, and **Revert** discards unsaved changes. Saving with an existing name updates that profile. Deleting a profile does not alter the current on-screen settings. The most recently loaded or saved profile name and its active settings are retained when the application is restarted.
+The Flight Profile tab can store multiple named setups. Configure the simulator, workflow, optimization options, application/service checkboxes, application **After Flight** actions, VR runtime, online-guidance preference, and custom app lists; type a name in **Saved User Profile**, then select **Save Changes**. Profiles can carry optional aircraft, VR-headset and monitor-configuration associations, and the simulator association follows the selected simulator. The difference table lists every current value that differs from the selected saved profile. Profiles can be duplicated, renamed, exported as portable versioned JSON files, and imported on another PC. Choose a profile and select **Load** to restore the complete setup and rescan the PC. **Revert** discards unsaved changes, and deleting a profile does not alter the current on-screen settings.
 
 Content Creator Mode can be enabled in Session options. In Automatic mode it keeps OBS, Streamlabs, Twitch Studio, Discord, Stream Deck, NVIDIA Broadcast, Voicemeeter, Elgato, XSplit, vMix, TikTok LIVE Studio, Meld Studio, NDI, Blackmagic, AJA, and matching helper services running. Manual mode remains fully user-controlled.
 
@@ -143,6 +158,7 @@ active-session.json   # present only during an unfinished real session
 pending-launch.json   # temporary UAC handoff; removed when the elevated session continues
 optimizer.log
 optimizer.log.1 ... optimizer.log.5   # rotated history
+performance-history.json             # latest 100 monitored flight summaries with version-change metadata
 Telemetry\telemetry-*.csv            # optional per-session performance data
 ```
 
@@ -168,6 +184,17 @@ The test runner has no third-party test framework dependency. It covers output p
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Release notes — 2.4.0
+
+- Added flight-session history with performance trend graphs, latest-versus-previous comparisons, and automatic simulator, GPU-driver and profile-change markers.
+- Added read-only CPU/GPU balance recommendations for DLSS mode, render scaling and stable frame-rate targets, with timestamped `UserCfg.opt` backup before any user-approved graphics change.
+- Added VR runtime diagnostics and an MSFS online-services health panel covering official service state, local connectivity, Microsoft/Xbox DNS and supporting services.
+- Expanded profile management with import, export, duplicate, rename, simulator/aircraft/headset/monitor associations, and exact saved-versus-current differences.
+- Added a one-click privacy-scrubbed support package containing logs, configuration, detected hardware, driver versions, restoration results, history and telemetry.
+- Added safer application and service controls with dependency visibility, stop warnings, restart-command checks and an application **Test Restart** action.
+- Added a Windows installer and clean uninstaller plus checksum-verified in-app downloads from official GitHub releases. Releases remain unsigned freeware and require no paid certificate.
+- Expanded automated validation to 58 passing tests.
 
 ## Release notes — 2.3.0
 

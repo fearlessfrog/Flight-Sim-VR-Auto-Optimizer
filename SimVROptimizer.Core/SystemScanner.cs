@@ -478,6 +478,7 @@ public sealed class SystemScanner
         var result = await _commands.RunAsync("sc.exe", ["query", "type=", "service"], cancellationToken).ConfigureAwait(false);
         if (!result.Succeeded) return [];
         var runningNames = OutputParsers.ParseRunningServices(result.StandardOutput);
+        var dependencyMap = ServiceDependencyInspector.Read(runningNames);
         return runningNames
             .Select(name =>
             {
@@ -487,6 +488,7 @@ public sealed class SystemScanner
                 if (profile is null && !thirdParty) return null;
                 var canStop = !IsProtectedService(name);
                 var classification = ServiceClassifier.Classify(name, profile is not null, canStop);
+                var dependencies = dependencyMap.GetValueOrDefault(name) ?? new ServiceDependencyInfo([], []);
                 return new ServiceCandidate
                 {
                     ServiceName = name,
@@ -495,6 +497,8 @@ public sealed class SystemScanner
                     Impact = profile?.Level ?? ImpactLevel.Unknown,
                     Reason = profile?.Reason ?? "No known direct MSFS impact. Stopping it may affect an associated hardware, network, update, or background feature.",
                     CanStop = canStop,
+                    Dependencies = dependencies.Dependencies,
+                    DependentServices = dependencies.DependentServices,
                     Classification = classification.Classification,
                     ClassificationReason = classification.Reason
                 };

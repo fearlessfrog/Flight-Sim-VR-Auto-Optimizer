@@ -255,9 +255,14 @@ public sealed class RunningAppCandidate : INotifyPropertyChanged
     };
     public string ImpactLabel => Impact == ImpactLevel.Unknown ? "NO KNOWN" : Impact.ToString();
     public string RestartSupport => RestartCommand.StartsWith("none:", StringComparison.OrdinalIgnoreCase) ? "Manual" : "Automatic";
+    public string RestartSafetyLabel => CanRestartAfterFlight ? "RESTART READY" : "NO RELIABLE COMMAND";
+    public string RestartSafetyDetail => CanRestartAfterFlight
+        ? "A restart command was detected. Use Test Restart before the flight if you want to verify it."
+        : "No reliable automatic restart command was detected. If selected, this application must remain closed after the flight or be restarted manually.";
     public bool IsOneDrive => ProcessName.Equals("OneDrive", StringComparison.OrdinalIgnoreCase);
     public bool CanRestartAfterFlight => !RestartCommand.StartsWith("none:", StringComparison.OrdinalIgnoreCase);
     public bool CanChangeAfterFlight => CanStop && CanRestartAfterFlight && !IsOneDrive;
+    public bool CanTestRestart => CanStop && CanRestartAfterFlight && AfterFlightAction == ApplicationAfterFlightAction.Restart;
     public IReadOnlyList<ApplicationAfterFlightChoice> AfterFlightChoices =>
         IsOneDrive ? RestartOnly : CanRestartAfterFlight ? AllAfterFlightChoices : LeaveClosedOnly;
     public ApplicationAfterFlightChoice SelectedAfterFlightChoice =>
@@ -278,6 +283,7 @@ public sealed class RunningAppCandidate : INotifyPropertyChanged
             OnPropertyChanged();
             OnPropertyChanged(nameof(SelectedAfterFlightChoice));
             OnPropertyChanged(nameof(PostFlightState));
+            OnPropertyChanged(nameof(CanTestRestart));
         }
     }
     public bool Selected
@@ -434,6 +440,17 @@ public sealed class ServiceCandidate : INotifyPropertyChanged
     public required ImpactLevel Impact { get; set; }
     public required string Reason { get; set; }
     public required bool CanStop { get; set; }
+    public IReadOnlyList<string> Dependencies { get; init; } = [];
+    public IReadOnlyList<string> DependentServices { get; init; } = [];
+    public bool HasDependencyLinks => Dependencies.Count > 0 || DependentServices.Count > 0;
+    public string DependencySummary => HasDependencyLinks
+        ? $"{Dependencies.Count} required / {DependentServices.Count} dependent"
+        : "None detected";
+    public string DependencyDetails => !HasDependencyLinks
+        ? "No direct Windows service dependencies or dependents were detected."
+        : string.Join(Environment.NewLine,
+            Dependencies.Count == 0 ? "Requires: none detected" : "Requires: " + string.Join(", ", Dependencies),
+            DependentServices.Count == 0 ? "Dependent services: none detected" : "Dependent services: " + string.Join(", ", DependentServices));
     public WorkloadClassification Classification { get; set; } = WorkloadClassification.Unknown;
     public string ClassificationReason { get; set; } = "Not yet classified.";
     public string ClassificationLabel => Classification switch
@@ -523,7 +540,24 @@ public sealed class SavedUserProfile
         get => _applicationAfterFlightActions;
         set => _applicationAfterFlightActions = new(value ?? [], StringComparer.OrdinalIgnoreCase);
     }
+    public ProfileAssociations Associations { get; set; } = new();
     public DateTimeOffset UpdatedAtUtc { get; set; }
+}
+
+public sealed class ProfileAssociations
+{
+    public string SimulatorId { get; set; } = "";
+    public string Aircraft { get; set; } = "";
+    public string VrHeadset { get; set; } = "";
+    public string MonitorConfiguration { get; set; } = "";
+}
+
+public sealed record ProfileDifference(string Category, string Setting, string SavedValue, string CurrentValue);
+
+public sealed class ProfileExportDocument
+{
+    public int FormatVersion { get; set; } = 1;
+    public SavedUserProfile Profile { get; set; } = new();
 }
 
 public sealed class CustomApplicationRule

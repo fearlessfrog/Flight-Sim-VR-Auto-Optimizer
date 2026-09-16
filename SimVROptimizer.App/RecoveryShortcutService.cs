@@ -36,6 +36,12 @@ internal sealed class RecoveryShortcutService
 
     public void MarkRecoveryComplete() => RemoveStartupShortcut();
 
+    public void RemoveAll()
+    {
+        if (File.Exists(DesktopShortcutPath)) File.Delete(DesktopShortcutPath);
+        RemoveStartupShortcut();
+    }
+
     private void RemoveStartupShortcut()
     {
         if (File.Exists(StartupShortcutPath)) File.Delete(StartupShortcutPath);

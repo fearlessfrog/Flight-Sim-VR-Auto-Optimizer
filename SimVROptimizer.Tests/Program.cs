@@ -1,8 +1,10 @@
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.IO.Compression;
 using SimVROptimizer.Core;
 
 var tests = new (string Name, Func<Task> Run)[]
@@ -27,8 +29,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Service classification", TestServiceClassificationAsync),
     ("Online application guidance", TestOnlineApplicationGuidanceAsync),
     ("Application update checker", TestApplicationUpdateCheckerAsync),
+    ("Verified update download", TestVerifiedUpdateDownloadAsync),
     ("Selection state notification", TestSelectionStateNotificationAsync),
     ("Application after-flight choices", TestApplicationAfterFlightChoicesAsync),
+    ("Application restart safety test", TestApplicationRestartSafetyAsync),
+    ("Service dependency inspection", TestServiceDependencyInspectionAsync),
     ("Saved selection preferences", TestSavedSelectionPreferencesAsync),
     ("Named user profiles", TestNamedUserProfilesAsync),
     ("Profiles survive administrator continuation", TestProfilesSurviveContinuationAsync),
@@ -40,7 +45,12 @@ var tests = new (string Name, Func<Task> Run)[]
     ("VR runtime shutdown policy", TestVrRuntimeShutdownPolicyAsync),
     ("Xbox post-flight online stack preservation", TestXboxSessionCleanupAsync),
     ("Performance telemetry calculations", TestPerformanceTelemetryAsync),
+    ("Performance session history comparison", TestPerformanceSessionHistoryAsync),
+    ("Privacy-scrubbed support package", TestSupportPackageAsync),
+    ("OpenXR diagnostics parsing", TestOpenXrDiagnosticsAsync),
+    ("MSFS online-services health parsing", TestMsfsOnlineHealthParsingAsync),
     ("MSFS display settings parser", TestMsfsDisplaySettingsParserAsync),
+    ("Display-setting recommendations and backup", TestDisplaySettingRecommendationsAsync),
     ("NVIDIA DLSS model preset mapping", TestNvidiaDlssPresetMappingAsync),
     ("NVIDIA DLSS information overlay values", TestNvidiaDlssIndicatorValuesAsync),
     ("Performance monitor sampling", TestPerformanceMonitorSamplingAsync),
@@ -575,7 +585,7 @@ static async Task TestApplicationUpdateCheckerAsync()
         return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
         {
             Content = new StringContent(
-                """{"tag_name":"v2.3.0","name":"VR Auto-Optimizer 2.3.0","html_url":"https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/tag/v2.3.0"}""",
+                """{"tag_name":"v2.3.0","name":"VR Auto-Optimizer 2.3.0","html_url":"https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/tag/v2.3.0","assets":[{"name":"VR-Auto-Optimizer-2.3.0-Setup.exe","browser_download_url":"https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/download/v2.3.0/VR-Auto-Optimizer-2.3.0-Setup.exe","size":123},{"name":"VR-Auto-Optimizer-2.3.0-Setup.exe.sha256","browser_download_url":"https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/download/v2.3.0/VR-Auto-Optimizer-2.3.0-Setup.exe.sha256","size":100}]}""",
                 Encoding.UTF8,
                 "application/json")
         };
@@ -588,11 +598,54 @@ static async Task TestApplicationUpdateCheckerAsync()
     Equal(new Version(2, 3, 0), available.LatestVersion);
     Equal("VR Auto-Optimizer 2.3.0", available.ReleaseName);
     Equal("github.com", available.ReleaseUri.Host);
+    True(available.VerifiedInstaller is not null);
+    Equal("VR-Auto-Optimizer-2.3.0-Setup.exe", available.VerifiedInstaller!.Name);
 
     var current = await checker.CheckAsync(new Version(2, 3, 0, 0));
     True(!current.IsUpdateAvailable);
     Equal(2, requests);
     Equal(new Version(2, 3, 1), ApplicationUpdateChecker.ParseReleaseVersion("v2.3.1-beta.1"));
+}
+
+static async Task TestVerifiedUpdateDownloadAsync()
+{
+    var installerBytes = Encoding.UTF8.GetBytes("signed-installer-test-content");
+    var expectedHash = Convert.ToHexString(SHA256.HashData(installerBytes));
+    const string installerName = "VR-Auto-Optimizer-2.3.0-Setup.exe";
+    var installerUri = new Uri($"https://github.com/macbrowndog/Flight-Sim-VR-Auto-Optimizer/releases/download/v2.3.0/{installerName}");
+    var checksumUri = new Uri(installerUri.AbsoluteUri + ".sha256");
+    using var client = new HttpClient(new StubHttpMessageHandler(request =>
+    {
+        if (request.RequestUri == checksumUri)
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{expectedHash} *{installerName}", Encoding.ASCII)
+            };
+        if (request.RequestUri == installerUri)
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(installerBytes)
+            };
+        return new HttpResponseMessage(System.Net.HttpStatusCode.NotFound);
+    }));
+    var directory = Path.Combine(AppContext.BaseDirectory, "test-data", Guid.NewGuid().ToString("N"));
+    var downloader = new VerifiedUpdateDownloader(client);
+    var result = await downloader.DownloadAsync(
+        new ReleaseDownloadAsset(installerName, installerUri, installerBytes.Length, installerName + ".sha256", checksumUri),
+        directory);
+    Equal(expectedHash, result.Sha256);
+    True(File.Exists(result.Path));
+    Equal(installerBytes.Length, (int)new FileInfo(result.Path).Length);
+
+    using var badClient = new HttpClient(new StubHttpMessageHandler(request =>
+        request.RequestUri == checksumUri
+            ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(new string('0', 64)) }
+            : new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(installerBytes) }));
+    var badDirectory = Path.Combine(directory, "bad");
+    await ThrowsAsync<InvalidDataException>(() => new VerifiedUpdateDownloader(badClient).DownloadAsync(
+        new ReleaseDownloadAsset(installerName, installerUri, installerBytes.Length, installerName + ".sha256", checksumUri),
+        badDirectory));
+    True(!File.Exists(Path.Combine(badDirectory, installerName)));
 }
 
 static Task TestOptimizationProfilesAsync()
@@ -807,7 +860,14 @@ static async Task TestNamedUserProfilesAsync()
         }
     };
 
-    var saved = UserProfileStore.SaveOrReplace(config, "MSFS VR");
+    var associations = new ProfileAssociations
+    {
+        SimulatorId = "msfs2024-store",
+        Aircraft = "Fenix A320",
+        VrHeadset = "Pimax Crystal",
+        MonitorConfiguration = "4K single monitor"
+    };
+    var saved = UserProfileStore.SaveOrReplace(config, "MSFS VR", associations);
     Equal("MSFS VR", config.ActiveSavedProfileName);
     Equal(1, config.SavedProfiles.Count);
     config.Options.Profile = OptimizationProfile.Standard;
@@ -817,6 +877,11 @@ static async Task TestNamedUserProfilesAsync()
     Equal(true, saved.ApplicationSelections["onedrive"]);
     Equal(ApplicationAfterFlightAction.Restart, saved.ApplicationAfterFlightActions["exampletool"]);
     Equal("ExampleTool", saved.CustomApplications[0].ProcessName);
+    Equal("Fenix A320", saved.Associations.Aircraft);
+
+    var differences = UserProfileStore.Diff(config, saved, associations);
+    True(differences.Any(item => item.Setting == "Profile"));
+    True(differences.Any(item => item.Category == "Applications" && item.Setting.Equals("OneDrive", StringComparison.OrdinalIgnoreCase)));
 
     True(UserProfileStore.TryApply(config, "msfs vr"));
     Equal("msfs2024-store", config.SelectedSimulatorId);
@@ -840,7 +905,19 @@ static async Task TestNamedUserProfilesAsync()
     Equal(1, loaded.SavedProfiles.Count);
     Equal(true, loaded.SavedProfiles[0].ApplicationSelections["onedrive"]);
     Equal(ApplicationAfterFlightAction.Restart, loaded.SavedProfiles[0].ApplicationAfterFlightActions["exampletool"]);
+    var duplicate = UserProfileStore.Duplicate(loaded, "MSFS VR", "MSFS VR Copy");
+    Equal("Fenix A320", duplicate.Associations.Aircraft);
+    var renamed = UserProfileStore.Rename(loaded, "MSFS VR Copy", "Airliner VR");
+    Equal("Airliner VR", renamed.Name);
+    var exportPath = Path.Combine(directory, "profile.vrprofile.json");
+    await UserProfileStore.ExportAsync(renamed, exportPath);
+    var importedFile = await UserProfileStore.ReadImportAsync(exportPath);
+    var importTarget = new AppConfig();
+    var imported = UserProfileStore.Import(importTarget, importedFile, replace: false);
+    Equal("Airliner VR", imported.Name);
+    Equal("Pimax Crystal", imported.Associations.VrHeadset);
     True(UserProfileStore.Delete(loaded, "MSFS VR"));
+    True(UserProfileStore.Delete(loaded, "Airliner VR"));
     Equal(0, loaded.SavedProfiles.Count);
     Equal<string?>(null, loaded.ActiveSavedProfileName);
     Directory.Delete(directory, true);
@@ -904,6 +981,8 @@ static Task TestApplicationAfterFlightChoicesAsync()
     Equal(ApplicationAfterFlightAction.Restart, restartable.AfterFlightAction);
     Equal("Restart", restartable.PostFlightState);
     True(restartable.CanChangeAfterFlight);
+    True(restartable.CanTestRestart);
+    Equal("RESTART READY", restartable.RestartSafetyLabel);
     Equal("RESTART", restartable.AfterFlightChoices.Single(choice => choice.Action == ApplicationAfterFlightAction.Restart).ToString());
     Equal(ApplicationAfterFlightAction.Restart, restartable.SelectedAfterFlightChoice.Action);
 
@@ -915,6 +994,8 @@ static Task TestApplicationAfterFlightChoicesAsync()
     manual.AfterFlightAction = ApplicationAfterFlightAction.Restart;
     Equal(ApplicationAfterFlightAction.LeaveClosed, manual.AfterFlightAction);
     True(!manual.CanChangeAfterFlight);
+    True(!manual.CanTestRestart);
+    Equal("NO RELIABLE COMMAND", manual.RestartSafetyLabel);
 
     var oneDrive = new RunningAppCandidate
     {
@@ -930,6 +1011,56 @@ static Task TestApplicationAfterFlightChoicesAsync()
     True(changed);
     Equal(ApplicationAfterFlightAction.Restart, restartable.AfterFlightAction);
     Equal(ApplicationAfterFlightAction.Restart, config.ApplicationAfterFlightActions["Example"]);
+    return Task.CompletedTask;
+}
+
+static async Task TestApplicationRestartSafetyAsync()
+{
+    var restarter = new FakeApplicationRestarter { Result = true };
+    var tester = new ApplicationRestartTester(restarter);
+    var restartable = new RunningAppCandidate
+    {
+        ProcessName = "DefinitelyNotRunningRestartTest", DisplayName = "Restart test", Impact = ImpactLevel.Low,
+        Reason = "Test", InstanceCount = 1, MemoryMb = 1, RestartCommand = @"exe:C:\Tools\RestartTest.exe", CanStop = true,
+        AfterFlightAction = ApplicationAfterFlightAction.Restart
+    };
+    var success = await tester.TestAsync(restartable);
+    True(success.Success);
+    Equal(restartable.ProcessName, restarter.ProcessName);
+    Equal(restartable.RestartCommand, restarter.RestartCommand);
+
+    var manual = new RunningAppCandidate
+    {
+        ProcessName = "ManualRestartTest", DisplayName = "Manual restart test", Impact = ImpactLevel.Low,
+        Reason = "Test", InstanceCount = 1, MemoryMb = 1, RestartCommand = "none:", CanStop = true
+    };
+    var failed = await tester.TestAsync(manual);
+    True(!failed.Success);
+}
+
+static Task TestServiceDependencyInspectionAsync()
+{
+    var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["BaseService"] = [],
+        ["ChildService"] = ["BaseService"],
+        ["GroupChild"] = ["+BaseService"],
+        ["OtherService"] = ["Unrelated"]
+    };
+    var dependents = ServiceDependencyInspector.FindDependents("BaseService", map);
+    Equal(2, dependents.Count);
+    True(dependents.Contains("ChildService"));
+    True(dependents.Contains("GroupChild"));
+    Equal(2, ServiceDependencyInspector.ReadMultiString("One;Two").Count);
+
+    var candidate = new ServiceCandidate
+    {
+        ServiceName = "BaseService", DisplayName = "Base service", Impact = ImpactLevel.Low,
+        Reason = "Test", CanStop = true, Dependencies = ["RpcSs"], DependentServices = dependents
+    };
+    True(candidate.HasDependencyLinks);
+    True(candidate.DependencySummary.Contains("1 required", StringComparison.Ordinal));
+    True(candidate.DependencyDetails.Contains("ChildService", StringComparison.Ordinal));
     return Task.CompletedTask;
 }
 
@@ -1030,6 +1161,134 @@ static Task TestPerformanceTelemetryAsync()
     return Task.CompletedTask;
 }
 
+static Task TestPerformanceSessionHistoryAsync()
+{
+    var started = new DateTimeOffset(2026, 9, 15, 10, 0, 0, TimeSpan.Zero);
+    var samples = new[]
+    {
+        new PerformanceTelemetrySample(started, 60, 60, 48, 16.7, 30, 20, 8, 8000, [20, 40], false, false, "SimConnect"),
+        new PerformanceTelemetrySample(started.AddSeconds(1), 62, 61, 49, 16.1, 34, 22, 7, 8100, [22, 46], true, false, "SimConnect"),
+        new PerformanceTelemetrySample(started.AddSeconds(2), 58, 60, 50, 17.2, 32, 21, 9, 8200, [24, 40], false, true, "SimConnect")
+    };
+    var latest = PerformanceSessionAnalyzer.Summarize(started, started.AddMinutes(10), "MSFS 2024", "Standard", samples,
+        "1.4.20.0", "NVIDIA 581.20", "2.3.0")!;
+    Equal(3, latest.SampleCount);
+    Equal(3, latest.FpsSampleCount);
+    True(Math.Abs(latest.AverageFps!.Value - 60) < 0.01);
+    Equal<double?>(50, latest.OnePercentLowFps);
+    Equal(1, latest.StutterCount);
+    Equal(1, latest.CpuSpikeCount);
+
+    var baseline = latest with
+    {
+        Id = Guid.NewGuid(), StartedAt = started.AddDays(-1), AverageFps = 55,
+        OnePercentLowFps = 45, AverageMainThreadMs = 10, StutterCount = 4, CpuSpikeCount = 3,
+        SimulatorVersion = "1.3.30.0", GpuDriverVersion = "NVIDIA 580.90"
+    };
+    var comparison = PerformanceSessionAnalyzer.CompareLatestMatching([baseline, latest])!;
+    Equal<double?>(5, comparison.AverageFpsDelta);
+    Equal<double?>(5, comparison.OnePercentLowDelta);
+    Equal<double?>(-2, comparison.MainThreadMsDelta);
+    True(comparison.StuttersPerMinuteDelta < 0);
+    True(comparison.CpuSpikesPerMinuteDelta < 0);
+    var changedProfile = latest with { Id = Guid.NewGuid(), StartedAt = started.AddDays(1), Profile = "Aggressive" };
+    var trend = PerformanceSessionAnalyzer.BuildTrend([latest, changedProfile, baseline]);
+    True(trend[1].Changes.Contains("SIM 1.3.30.0 → 1.4.20.0", StringComparison.Ordinal));
+    True(trend[1].Changes.Contains("GPU NVIDIA 580.90 → NVIDIA 581.20", StringComparison.Ordinal));
+    True(trend[2].Changes.Contains("PROFILE Standard → Aggressive", StringComparison.Ordinal));
+    return Task.CompletedTask;
+}
+
+static async Task TestSupportPackageAsync()
+{
+    var directory = Path.Combine(AppContext.BaseDirectory, "test-data", Guid.NewGuid().ToString("N"));
+    var paths = new AppPaths(directory);
+    paths.EnsureCreated();
+    await File.WriteAllTextAsync(paths.LogFile,
+        @"User Andrew opened C:\Users\Andrew\Documents\Private\profile.json on ANDREW-PC.");
+    await File.WriteAllTextAsync(paths.RestorationReportFile,
+        "{\"path\":\"C:\\\\Users\\\\Andrew\\\\AppData\\\\Local\\\\SimVROptimizer\"}");
+
+    var config = new AppConfig
+    {
+        SelectedSimulatorId = "msfs2024-store",
+        ActiveSavedProfileName = "Test",
+        CustomApplications =
+        [
+            new CustomApplicationRule
+            {
+                ProcessName = "PrivateTool",
+                RestartExecutablePath = @"C:\Users\Andrew\Downloads\PrivateTool.exe"
+            }
+        ]
+    };
+    var scrubber = new SupportPrivacyScrubber(
+        "Andrew",
+        "ANDREW-PC",
+        [(@"C:\Users\Andrew\Documents", "<DOCUMENTS>"), (@"C:\Users\Andrew", "<USERPROFILE>")]);
+    var exporter = new SupportPackageExporter(paths, scrubber);
+    var packagePath = Path.Combine(directory, "support.zip");
+    var result = await exporter.ExportAsync(packagePath,
+        new SupportPackageContext(config, null, [], [], "2.3.0"));
+
+    True(File.Exists(packagePath));
+    True(result.FileCount >= 7);
+    using var archive = ZipFile.OpenRead(packagePath);
+    True(archive.GetEntry("configuration.json") is not null);
+    True(archive.GetEntry("hardware-and-drivers.json") is not null);
+    True(archive.GetEntry("restoration/last-restoration-report.json") is not null);
+    True(archive.GetEntry("logs/optimizer.log") is not null);
+    foreach (var entry in archive.Entries)
+    {
+        using var reader = new StreamReader(entry.Open());
+        var content = await reader.ReadToEndAsync();
+        True(!content.Contains("Andrew", StringComparison.OrdinalIgnoreCase));
+        True(!content.Contains("ANDREW-PC", StringComparison.OrdinalIgnoreCase));
+        True(!content.Contains(@"C:\Users\Andrew", StringComparison.OrdinalIgnoreCase));
+    }
+}
+
+static Task TestOpenXrDiagnosticsAsync()
+{
+    var manifest = """{"file_format_version":"1.0.0","runtime":{"name":"Test OpenXR","api_version":"1.1","library_path":"runtime.dll"}}""";
+    var parsed = OpenXrDiagnostics.ParseRuntimeManifest(manifest, "Fallback");
+    Equal("Test OpenXR", parsed.Name);
+    Equal("1.1", parsed.ApiVersion);
+    True(OpenXrDiagnostics.IsLayerEnabled(0));
+    True(!OpenXrDiagnostics.IsLayerEnabled(1));
+    var display = OpenXrDiagnostics.ParseSteamVrSettings("""{"LastKnown":{"HMDModel":"Test HMD"},"steamvr":{"displayFrequency":90,"supersampleScale":1.5,"motionSmoothing":false}}""");
+    Equal("Test HMD", display.Headset);
+    Equal("90 Hz", display.RefreshRate);
+    Equal("150%", display.RenderScale);
+    Equal("OFF", display.MotionReprojection);
+    Equal(DiagnosticHealth.Ready, OpenXrDiagnostics.EvaluateRuntimeAlignment(VrRuntimePreference.PimaxPlay, "Pimax OpenXR").Health);
+    Equal(DiagnosticHealth.Ready, OpenXrDiagnostics.EvaluateRuntimeAlignment(VrRuntimePreference.VirtualDesktop, "VDXR").Health);
+    Equal(DiagnosticHealth.Review, OpenXrDiagnostics.EvaluateRuntimeAlignment(VrRuntimePreference.SteamVR, "Pimax OpenXR").Health);
+    return Task.CompletedTask;
+}
+
+static Task TestMsfsOnlineHealthParsingAsync()
+{
+    Equal("RUNNING", MsfsOnlineServicesHealthChecker.ParseServiceState("STATE : 4 RUNNING", "", 0));
+    Equal("STOPPED", MsfsOnlineServicesHealthChecker.ParseServiceState("STATE : 1 STOPPED", "", 0));
+    Equal("NOT INSTALLED", MsfsOnlineServicesHealthChecker.ParseServiceState("", "OpenService FAILED 1060", 1060));
+    True(MsfsOnlineServicesHealthChecker.IsDisabledService("START_TYPE : 4 DISABLED"));
+    True(!MsfsOnlineServicesHealthChecker.IsDisabledService("START_TYPE : 3 DEMAND_START"));
+    var official = MsfsOfficialServiceStatusClient.ParseStatusHtml("""
+        <title>Online Services Monitoring</title><p>Last Updated: 08:15UTC - July 28th, 2026</p>
+        <h1>Live Weather</h1><p>MSFS 2020: Operational</p><p>MSFS 2024: Operational</p>
+        <h1>Live traffic</h1><p>MSFS 2020: Operational</p><p>MSFS 2024: Degraded</p>
+        <h1>Multiplayer</h1><p>MSFS 2020: Operational</p><p>MSFS 2024: Operational</p>
+        <h1>Online Services</h1><p>MSFS 2020: Operational</p><p>MSFS 2024: Operational</p>
+        """);
+    Equal(4, official.Items.Count);
+    Equal("OPERATIONAL", official.Items[0].State);
+    Equal("DEGRADED", official.Items[1].State);
+    Equal(DiagnosticHealth.Problem, official.Items[1].Health);
+    True(official.LastUpdated.Contains("July 28th, 2026", StringComparison.Ordinal));
+    return Task.CompletedTask;
+}
+
 static Task TestMsfsDisplaySettingsParserAsync()
 {
     const string config = """
@@ -1058,6 +1317,39 @@ static Task TestMsfsDisplaySettingsParserAsync()
     Equal("TAA", settings.Vr.AntiAliasing);
     Equal("AUTO", settings.Vr.DlssMode);
     Equal("VR Medium", settings.Vr.Preset);
+    return Task.CompletedTask;
+}
+
+static Task TestDisplaySettingRecommendationsAsync()
+{
+    var settings = new MsfsGraphicsDisplaySetting("DLSS", "QUALITY", "2.1.0", "VR Ultra");
+    var cpuSession = new PerformanceSessionSummary(Guid.NewGuid(), DateTimeOffset.Now, "MSFS 2024", "Standard",
+        20, 100, 100, 72, 55, 13.9, 35, 28, 12.0, 8192, 1, 0, "Test");
+    var cpu = DisplaySettingRecommendationEngine.Analyze(settings, cpuSession, "90 Hz");
+    Equal(PerformanceBalance.LikelyCpuLimited, cpu.Balance);
+    True(cpu.DlssRecommendation.Contains("unlikely", StringComparison.OrdinalIgnoreCase));
+    True(cpu.FrameRateTarget.Contains("45 FPS", StringComparison.OrdinalIgnoreCase));
+
+    var gpuSession = cpuSession with { AverageFrameTimeMs = 20, AverageMainThreadMs = 6, AverageFps = 42, OnePercentLowFps = 38 };
+    var gpu = DisplaySettingRecommendationEngine.Analyze(settings, gpuSession, "90 Hz");
+    Equal(PerformanceBalance.LikelyGpuLimited, gpu.Balance);
+    True(gpu.DlssRecommendation.Contains("Balanced", StringComparison.OrdinalIgnoreCase));
+
+    var directory = Path.Combine(Path.GetTempPath(), "simvr-backup-test-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var configPath = Path.Combine(directory, "UserCfg.opt");
+        File.WriteAllText(configPath, "Version 1");
+        var backupPath = MsfsUserCfgBackup.Create(configPath, new DateTimeOffset(2026, 9, 16, 10, 30, 0, TimeSpan.Zero));
+        True(File.Exists(backupPath));
+        Equal("Version 1", File.ReadAllText(backupPath));
+        True(backupPath.EndsWith("UserCfg.opt.backup-20260916-103000", StringComparison.OrdinalIgnoreCase));
+    }
+    finally
+    {
+        Directory.Delete(directory, recursive: true);
+    }
     return Task.CompletedTask;
 }
 

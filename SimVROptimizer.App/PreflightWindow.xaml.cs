@@ -9,8 +9,8 @@ public partial class PreflightWindow : Window
     public PreflightWindow(PreflightReport report, IReadOnlyList<PreflightItem>? plannedActions = null)
     {
         InitializeComponent();
-        CheckItems.ItemsSource = report.Items
-            .Concat(plannedActions ?? [])
+        var allItems = report.Items.Concat(plannedActions ?? []).ToArray();
+        CheckItems.ItemsSource = allItems
             .Select(PreflightDisplayItem.From)
             .ToArray();
         ContinueButton.IsEnabled = report.CanProceed;
@@ -20,9 +20,10 @@ public partial class PreflightWindow : Window
             SummaryPanel.Background = Brush("#102219");
             SummaryPanel.BorderBrush = FindBrush("GreenBrush");
             SummaryText.Foreground = FindBrush("GreenBrush");
-            SummaryText.Text = report.WarningCount == 0
+            var warningCount = allItems.Count(item => item.Status == PreflightStatus.Warning);
+            SummaryText.Text = warningCount == 0
                 ? "READY TO START / Save open work, then confirm the listed flight-session actions."
-                : $"READY WITH {report.WarningCount} WARNING(S) / Review the amber entries and save open work before starting.";
+                : $"READY WITH {warningCount} WARNING(S) / Review the amber entries and save open work before starting.";
         }
         else
         {

@@ -2,12 +2,13 @@ namespace SimVROptimizer.Core;
 
 public static class UserProfileStore
 {
-    public static SavedUserProfile SaveOrReplace(AppConfig config, string name)
+    public static SavedUserProfile SaveOrReplace(AppConfig config, string name, ProfileAssociations? associations = null)
     {
         name = NormalizeName(name);
-        var saved = Snapshot(config, name);
         var existing = config.SavedProfiles.FindIndex(item =>
             item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (associations is null && existing >= 0) associations = config.SavedProfiles[existing].Associations;
+        var saved = Snapshot(config, name, associations);
         if (existing >= 0) config.SavedProfiles[existing] = saved;
         else config.SavedProfiles.Add(saved);
         config.SavedProfiles = config.SavedProfiles
@@ -43,6 +44,98 @@ public static class UserProfileStore
         return removed;
     }
 
+    public static SavedUserProfile Duplicate(AppConfig config, string sourceName, string newName)
+    {
+        var source = FindRequired(config, sourceName);
+        newName = NormalizeName(newName);
+        if (config.SavedProfiles.Any(item => item.Name.Equals(newName, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException($"A profile named '{newName}' already exists.", nameof(newName));
+        var copy = Copy(source);
+        copy.Name = newName;
+        copy.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        config.SavedProfiles.Add(copy);
+        Sort(config);
+        return copy;
+    }
+
+    public static SavedUserProfile Rename(AppConfig config, string oldName, string newName)
+    {
+        var profile = FindRequired(config, oldName);
+        newName = NormalizeName(newName);
+        if (!profile.Name.Equals(newName, StringComparison.OrdinalIgnoreCase)
+            && config.SavedProfiles.Any(item => item.Name.Equals(newName, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException($"A profile named '{newName}' already exists.", nameof(newName));
+        var wasActive = string.Equals(config.ActiveSavedProfileName, profile.Name, StringComparison.OrdinalIgnoreCase);
+        profile.Name = newName;
+        profile.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        if (wasActive) config.ActiveSavedProfileName = newName;
+        Sort(config);
+        return profile;
+    }
+
+    public static async Task ExportAsync(SavedUserProfile profile, string path, CancellationToken cancellationToken = default) =>
+        await JsonStore.SaveAtomicAsync(path, new ProfileExportDocument { Profile = Copy(profile) }, cancellationToken).ConfigureAwait(false);
+
+    public static async Task<SavedUserProfile> ReadImportAsync(string path, CancellationToken cancellationToken = default)
+    {
+        var document = await JsonStore.LoadRequiredAsync<ProfileExportDocument>(path, cancellationToken).ConfigureAwait(false);
+        if (document.FormatVersion != 1) throw new InvalidDataException($"Unsupported profile format version: {document.FormatVersion}.");
+        if (document.Profile is null || document.Profile.Options is null)
+            throw new InvalidDataException("The profile file is incomplete.");
+        document.Profile.Name = NormalizeName(document.Profile.Name);
+        return Copy(document.Profile);
+    }
+
+    public static SavedUserProfile Import(AppConfig config, SavedUserProfile profile, bool replace)
+    {
+        profile = Copy(profile);
+        profile.Name = NormalizeName(profile.Name);
+        profile.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        var existing = config.SavedProfiles.FindIndex(item => item.Name.Equals(profile.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing >= 0 && !replace) throw new ArgumentException($"A profile named '{profile.Name}' already exists.");
+        if (existing >= 0) config.SavedProfiles[existing] = profile;
+        else config.SavedProfiles.Add(profile);
+        Sort(config);
+        return profile;
+    }
+
+    public static IReadOnlyList<ProfileDifference> Diff(AppConfig current, SavedUserProfile saved, ProfileAssociations? associations = null)
+    {
+        var differences = new List<ProfileDifference>();
+        Add("General", "Simulator", saved.SelectedSimulatorId, current.SelectedSimulatorId);
+        Add("General", "Workflow mode", saved.SessionMode, current.SessionMode);
+        foreach (var property in typeof(OptimizerOptions).GetProperties().Where(property => property.CanRead))
+            Add("Optimizer", Humanize(property.Name), property.GetValue(saved.Options), property.GetValue(current.Options));
+        Add("Custom apps", "Rules", Rules(saved.CustomApplications), Rules(current.CustomApplications));
+        AddDictionary("Applications", saved.ApplicationSelections, current.ApplicationSelections);
+        AddDictionary("Services", saved.ServiceSelections, current.ServiceSelections);
+        AddDictionary("After flight", saved.ApplicationAfterFlightActions, current.ApplicationAfterFlightActions);
+        var currentAssociations = associations ?? new ProfileAssociations { SimulatorId = current.SelectedSimulatorId ?? "" };
+        var savedAssociations = saved.Associations ?? new ProfileAssociations();
+        Add("Associations", "Simulator", savedAssociations.SimulatorId, currentAssociations.SimulatorId);
+        Add("Associations", "Aircraft", savedAssociations.Aircraft, currentAssociations.Aircraft);
+        Add("Associations", "VR headset", savedAssociations.VrHeadset, currentAssociations.VrHeadset);
+        Add("Associations", "Monitor configuration", savedAssociations.MonitorConfiguration, currentAssociations.MonitorConfiguration);
+        return differences;
+
+        void Add(string category, string setting, object? savedValue, object? currentValue)
+        {
+            var left = Format(savedValue);
+            var right = Format(currentValue);
+            if (!left.Equals(right, StringComparison.Ordinal)) differences.Add(new(category, setting, left, right));
+        }
+
+        void AddDictionary<T>(string category, IReadOnlyDictionary<string, T> savedValues, IReadOnlyDictionary<string, T> currentValues)
+        {
+            foreach (var key in savedValues.Keys.Concat(currentValues.Keys).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            {
+                savedValues.TryGetValue(key, out var savedValue);
+                currentValues.TryGetValue(key, out var currentValue);
+                Add(category, key, savedValues.ContainsKey(key) ? savedValue : null, currentValues.ContainsKey(key) ? currentValue : null);
+            }
+        }
+    }
+
     public static AppConfig CreateContinuedConfig(AppConfig current, PendingLaunch pending) => new()
     {
         SelectedSimulatorId = pending.SimulatorId,
@@ -58,7 +151,7 @@ public static class UserProfileStore
         SavedProfiles = current.SavedProfiles.Select(Copy).ToList()
     };
 
-    private static SavedUserProfile Snapshot(AppConfig config, string name) => new()
+    private static SavedUserProfile Snapshot(AppConfig config, string name, ProfileAssociations? associations) => new()
     {
         Name = name,
         SelectedSimulatorId = config.SelectedSimulatorId,
@@ -68,6 +161,7 @@ public static class UserProfileStore
         ApplicationSelections = Copy(config.ApplicationSelections),
         ServiceSelections = Copy(config.ServiceSelections),
         ApplicationAfterFlightActions = Copy(config.ApplicationAfterFlightActions),
+        Associations = Copy(associations ?? new ProfileAssociations { SimulatorId = config.SelectedSimulatorId ?? "" }),
         UpdatedAtUtc = DateTimeOffset.UtcNow
     };
 
@@ -119,8 +213,39 @@ public static class UserProfileStore
         ApplicationSelections = Copy(source.ApplicationSelections),
         ServiceSelections = Copy(source.ServiceSelections),
         ApplicationAfterFlightActions = Copy(source.ApplicationAfterFlightActions),
+        Associations = Copy(source.Associations ?? new ProfileAssociations()),
         UpdatedAtUtc = source.UpdatedAtUtc
     };
+
+    private static ProfileAssociations Copy(ProfileAssociations source) => new()
+    {
+        SimulatorId = source.SimulatorId,
+        Aircraft = source.Aircraft,
+        VrHeadset = source.VrHeadset,
+        MonitorConfiguration = source.MonitorConfiguration
+    };
+
+    private static SavedUserProfile FindRequired(AppConfig config, string name) =>
+        config.SavedProfiles.FirstOrDefault(item => item.Name.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase))
+        ?? throw new ArgumentException("Choose a saved profile first.", nameof(name));
+
+    private static void Sort(AppConfig config) => config.SavedProfiles = config.SavedProfiles
+        .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
+    private static string Rules(IEnumerable<CustomApplicationRule> rules) => string.Join(" | ", rules
+        .Select(rule => $"{rule.ProcessName}={rule.RestartExecutablePath}")
+        .OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
+
+    private static string Format(object? value) => value switch
+    {
+        null => "—",
+        bool flag => flag ? "On" : "Off",
+        string text when string.IsNullOrWhiteSpace(text) => "—",
+        _ => value.ToString() ?? "—"
+    };
+
+    private static string Humanize(string name) => string.Concat(name.Select((character, index) =>
+        index > 0 && char.IsUpper(character) ? " " + character : character.ToString()));
 
     private static Dictionary<string, bool> Copy(Dictionary<string, bool> source) =>
         new(source, StringComparer.OrdinalIgnoreCase);

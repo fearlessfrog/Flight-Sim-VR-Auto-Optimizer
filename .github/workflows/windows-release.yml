@@ -1,0 +1,58 @@
+name: Windows freeware release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 2.4.0
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $label = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.version }}' } else { '${{ github.ref_name }}'.TrimStart('v') }
+          if ($label -notmatch '^(?<version>\d+\.\d+\.\d+)(?<suffix>-rc\.\d+)?$') { throw "Invalid release version: $label" }
+          "label=$label" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "value=$($Matches.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "prerelease=$([bool]$Matches.suffix)".ToLowerInvariant() | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build installer and checksum
+        shell: pwsh
+        run: .\scripts\Build-Release.ps1 -Version '${{ steps.version.outputs.value }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VR-Auto-Optimizer-${{ steps.version.outputs.value }}-release
+          path: |
+            outputs/release/VR-Auto-Optimizer-${{ steps.version.outputs.value }}-Setup.exe
+            outputs/release/VR-Auto-Optimizer-${{ steps.version.outputs.value }}-Setup.exe.sha256
+      - name: Publish tagged GitHub release assets
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ github.ref_name }}' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $options = @('--generate-notes', '--title', "VR Auto-Optimizer ${{ steps.version.outputs.label }}")
+            if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $options += '--prerelease' }
+            gh release create '${{ github.ref_name }}' @options
+          }
+          gh release upload '${{ github.ref_name }}' outputs/release/* --clobber

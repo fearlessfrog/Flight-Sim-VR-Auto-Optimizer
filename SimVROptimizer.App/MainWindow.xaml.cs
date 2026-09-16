@@ -16,8 +16,12 @@ public partial class MainWindow : Window
     private readonly SystemScanner _scanner;
     private readonly OnlineApplicationGuidanceClient _onlineApplicationGuidance = new();
     private readonly ApplicationUpdateChecker _updateChecker = new();
+    private readonly VerifiedUpdateDownloader _updateDownloader = new();
     private readonly VrRuntimeLauncher _vrRuntimeLauncher;
+    private readonly MsfsOnlineServicesHealthChecker _onlineServicesHealth;
+    private readonly PerformanceHistoryStore _performanceHistoryStore;
     private readonly RecoveryShortcutService _recoveryShortcuts;
+    private readonly ApplicationRestartTester _applicationRestartTester = new();
     private AppConfig _config = new();
     private IReadOnlyList<RunningAppCandidate> _applications = [];
     private IReadOnlyList<ServiceCandidate> _services = [];
@@ -34,10 +38,22 @@ public partial class MainWindow : Window
     private readonly MsfsToolbarPanelInstaller _toolbarPanelInstaller;
     private CpuProfile? _cpuProfile;
     private readonly Queue<PerformanceTelemetrySample> _dashboardHistory = new();
+    private readonly object _performanceSessionGate = new();
+    private readonly List<PerformanceTelemetrySample> _performanceSessionSamples = [];
+    private DateTimeOffset? _performanceSessionStartedAt;
+    private string _performanceSessionSimulator = "";
+    private string _performanceSessionProfile = "";
+    private string _performanceSessionSimulatorVersion = "Unknown";
+    private string _performanceSessionGpuDriverVersion = "Unknown";
+    private string _performanceSessionOptimizerVersion = "Unknown";
+    private IReadOnlyList<PerformanceTrendEntry> _performanceTrend = [];
+    private MsfsDisplaySettings? _currentDisplaySettings;
+    private MsfsOnlineHealthReport? _lastOnlineHealth;
     private int _dashboardStutterCount;
     private int _dashboardCpuSpikeCount;
     private bool _restartRequiredAfterSession;
     private bool _profileDirty;
+    private bool _loadingProfileAssociations;
 
     public MainWindow(bool continueSession = false, bool restoreLastSession = false)
     {
@@ -50,6 +66,8 @@ public partial class MainWindow : Window
         _paths.EnsureCreated();
         var logger = new FileLogger(_paths.LogFile);
         var commands = new CommandRunner();
+        _onlineServicesHealth = new MsfsOnlineServicesHealthChecker(commands);
+        _performanceHistoryStore = new PerformanceHistoryStore(_paths.PerformanceHistoryFile);
         var optimizer = new TransactionalOptimizer(commands, _paths, logger);
         _vrRuntimeLauncher = new VrRuntimeLauncher(logger);
         _coordinator = new SessionCoordinator(
@@ -117,6 +135,8 @@ public partial class MainWindow : Window
         }
 
         await ScanSystemAsync();
+        RefreshVrDiagnostics();
+        await RefreshPerformanceHistoryAsync();
 
         if (_continueSession && !_coordinator.HasRecoveryJournal)
             await ContinuePendingLaunchAsync();
@@ -142,7 +162,22 @@ public partial class MainWindow : Window
         _config = ReadConfigFromControls(simulator.Id, timeout);
         await SaveConfigAsync();
 
-        var preflight = SessionPreflight.Evaluate(new SessionPreflightContext(
+        if (simulator.Id.StartsWith("msfs", StringComparison.OrdinalIgnoreCase))
+        {
+            DiagnosticsStatusText.Text = "Checking MSFS online-services readiness before launch…";
+            try
+            {
+                _lastOnlineHealth = await _onlineServicesHealth.CheckAsync();
+                UpdateOnlineHealthDisplay(_lastOnlineHealth);
+            }
+            catch (Exception exception)
+            {
+                _lastOnlineHealth = null;
+                AppendStatus("MSFS online-services preflight check could not complete: " + exception.Message);
+            }
+        }
+
+        var basePreflight = SessionPreflight.Evaluate(new SessionPreflightContext(
             AdminService.IsAdministrator(),
             _coordinator.HasRecoveryJournal,
             simulator,
@@ -150,6 +185,9 @@ public partial class MainWindow : Window
             _applications,
             _services,
             _config.Options.Profile));
+        var preflight = simulator.Id.StartsWith("msfs", StringComparison.OrdinalIgnoreCase) && _lastOnlineHealth is not null
+            ? new PreflightReport(basePreflight.Items.Append(BuildOnlineServicesPreflightItem(_lastOnlineHealth)).ToArray())
+            : basePreflight;
 
         if (!automaticConfirmed || !preflight.CanProceed)
         {
@@ -226,6 +264,9 @@ public partial class MainWindow : Window
             return;
         }
 
+        _currentDisplaySettings = settings;
+        BackupUserCfgButton.IsEnabled = File.Exists(settings.ConfigPath);
+
         var nvidia = NvidiaDlssSettingsReader.Read(detectedSimulator.Definition.Id);
         SetDisplayMode(settings.Desktop, nvidia.DlssLibraryVersion, DisplayDesktopRenderingText, DisplayDesktopDlssText);
         SetDisplayMode(settings.Vr, nvidia.DlssLibraryVersion, DisplayVrRenderingText, DisplayVrDlssText);
@@ -239,6 +280,48 @@ public partial class MainWindow : Window
         DisplayConfigPathText.ToolTip = settings.ConfigPath;
         DisplayNvidiaStatusText.Text = nvidia.Status;
         DisplaySettingsStatusText.Text = $"SETTINGS READ  /  {detectedSimulator.Name}  /  {DateTime.Now:t}";
+        _ = RefreshDisplayRecommendationsAsync(settings, detectedSimulator.Name);
+    }
+
+    private async Task RefreshDisplayRecommendationsAsync(MsfsDisplaySettings settings, string simulatorName)
+    {
+        try
+        {
+            var sessions = await _performanceHistoryStore.LoadAsync();
+            var latest = sessions.FirstOrDefault(session => session.Simulator.Equals(simulatorName, StringComparison.OrdinalIgnoreCase));
+            var runtime = OpenXrDiagnostics.Read();
+            var recommendation = DisplaySettingRecommendationEngine.Analyze(settings.Vr, latest, runtime.Display.RefreshRate);
+            DisplayBalanceText.Text = "BALANCE  /  " + recommendation.BalanceLabel;
+            DisplayBalanceText.Foreground = HealthBrush(recommendation.Balance == PerformanceBalance.InsufficientData
+                ? DiagnosticHealth.Review : DiagnosticHealth.Ready);
+            DisplayDlssRecommendationText.Text = "DLSS  /  " + recommendation.DlssRecommendation;
+            DisplayScaleRecommendationText.Text = "RENDER SCALE  /  " + recommendation.RenderScaleRecommendation;
+            DisplayTargetRecommendationText.Text = "FRAME-RATE TARGET  /  " + recommendation.FrameRateTarget;
+            DisplayRecommendationEvidenceText.Text = "EVIDENCE  /  " + recommendation.Evidence;
+            DisplayRecommendationSafetyText.Text = recommendation.SafetyNote;
+        }
+        catch (Exception exception)
+        {
+            DisplayBalanceText.Text = "BALANCE  /  Recommendation unavailable: " + exception.Message;
+            DisplayBalanceText.Foreground = (Brush)FindResource("AccentBrush");
+        }
+    }
+
+    private void BackupUserCfgButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_currentDisplaySettings is null) return;
+        try
+        {
+            var backup = MsfsUserCfgBackup.Create(_currentDisplaySettings.ConfigPath);
+            AppendStatus("UserCfg.opt backup created: " + backup);
+            MessageBox.Show("Backup created successfully:\n\n" + backup + "\n\nNo graphics settings were changed.",
+                "UserCfg.opt backup", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("UserCfg.opt could not be backed up: " + exception.Message,
+                "UserCfg.opt backup", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void RefreshGpuDriverDetails()
@@ -301,6 +384,8 @@ public partial class MainWindow : Window
 
     private void ClearDisplaySettingsPanel(string status)
     {
+        _currentDisplaySettings = null;
+        BackupUserCfgButton.IsEnabled = false;
         DisplaySettingsStatusText.Text = status;
         DisplayDesktopRenderingText.Text = "—";
         DisplayDesktopDlssText.Text = "DLSS MODE  /  —";
@@ -311,6 +396,11 @@ public partial class MainWindow : Window
         DisplayConfigVersionText.Text = "USERCFG VERSION  /  —";
         DisplayConfigPathText.Text = "USERCFG.OPT  /  —";
         DisplayNvidiaStatusText.Text = string.Empty;
+        DisplayBalanceText.Text = "BALANCE  /  Complete a monitored VR flight to generate recommendations.";
+        DisplayDlssRecommendationText.Text = "DLSS  /  —";
+        DisplayScaleRecommendationText.Text = "RENDER SCALE  /  —";
+        DisplayTargetRecommendationText.Text = "FRAME-RATE TARGET  /  —";
+        DisplayRecommendationEvidenceText.Text = "EVIDENCE  /  —";
         foreach (var text in new[] { DisplayFgValueText, DisplayFgSourceText, DisplaySrValueText, DisplaySrSourceText, DisplayRrValueText, DisplayRrSourceText })
             text.Text = "—";
     }
@@ -334,13 +424,286 @@ public partial class MainWindow : Window
         sourceText.Text = setting.Source;
     }
 
+    private async void RefreshDiagnosticsButton_Click(object sender, RoutedEventArgs e) => await RefreshDiagnosticsAsync();
+
+    private async void ExportSupportPackageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var version = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version;
+        var versionText = version is null ? "Unknown" : $"{version.Major}.{version.Minor}.{version.Build}";
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Export privacy-scrubbed support package",
+            Filter = "ZIP archive (*.zip)|*.zip",
+            FileName = $"VR-Auto-Optimizer-Support-{DateTime.Now:yyyyMMdd-HHmmss}.zip",
+            AddExtension = true,
+            DefaultExt = ".zip"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+
+        DiagnosticsStatusText.Text = "Creating privacy-scrubbed support package…";
+        try
+        {
+            var exporter = new SupportPackageExporter(_paths);
+            var context = new SupportPackageContext(
+                _config,
+                _cpuProfile,
+                _applications,
+                _services,
+                versionText);
+            var result = await exporter.ExportAsync(dialog.FileName, context);
+            DiagnosticsStatusText.Text = $"SUPPORT PACKAGE READY  /  {result.FileCount} files  /  {result.SizeBytes / 1024d / 1024d:0.0} MB";
+            AppendStatus($"Exported privacy-scrubbed support package to {result.Path}.");
+            MessageBox.Show(
+                "The support package is ready. Usernames, the computer name and personal Windows folder paths were replaced automatically. You may now attach the ZIP to Discord.",
+                "Support package exported", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsStatusText.Text = "SUPPORT PACKAGE FAILED  /  " + exception.Message;
+            MessageBox.Show("The support package could not be created: " + exception.Message,
+                "Support package", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async Task RefreshDiagnosticsAsync()
+    {
+        DiagnosticsStatusText.Text = "Refreshing OpenXR, online-services and performance-history diagnostics…";
+        RefreshVrDiagnostics();
+        await RefreshPerformanceHistoryAsync();
+        try
+        {
+            _lastOnlineHealth = await _onlineServicesHealth.CheckAsync();
+            UpdateOnlineHealthDisplay(_lastOnlineHealth);
+            DiagnosticsStatusText.Text = $"DIAGNOSTICS REFRESHED  /  {DateTime.Now:t}";
+        }
+        catch (Exception exception)
+        {
+            OnlineHealthSummaryText.Text = "CHECK FAILED  /  " + exception.Message;
+            OnlineHealthSummaryText.Foreground = (Brush)FindResource("RedBrush");
+            DiagnosticsStatusText.Text = "Diagnostics completed with an online-services check error.";
+        }
+    }
+
+    private void RefreshVrDiagnostics()
+    {
+        var report = OpenXrDiagnostics.Read();
+        var selected = _config.Options.VrRuntime;
+        var availability = _vrRuntimeLauncher.CheckAvailability(selected);
+        var alignment = OpenXrDiagnostics.EvaluateRuntimeAlignment(selected, report.RuntimeName);
+        VrHealthSummaryText.Text = report.Health.ToString().ToUpperInvariant() + "  /  " + report.Summary;
+        VrHealthSummaryText.Foreground = HealthBrush(report.Health);
+        VrSelectedRuntimeText.Text = "AUTO-LAUNCH RUNTIME  /  " + selected;
+        VrRuntimeAvailabilityText.Text = "LAUNCHER STATUS  /  " + availability.Detail;
+        VrRuntimeAvailabilityText.Foreground = HealthBrush(availability.Available ? DiagnosticHealth.Ready : DiagnosticHealth.Problem);
+        VrRuntimeAlignmentText.Text = "RUNTIME ALIGNMENT  /  " + alignment.Detail;
+        VrRuntimeAlignmentText.Foreground = HealthBrush(alignment.Health);
+        VrRuntimeNameText.Text = "ACTIVE RUNTIME  /  " + report.RuntimeName;
+        VrRuntimeApiText.Text = "OPENXR API  /  " + report.ApiVersion;
+        VrRuntimeManifestText.Text = "MANIFEST  /  " + report.RuntimeManifest;
+        VrRuntimeManifestText.ToolTip = report.RuntimeManifest;
+        VrRuntimeProcessesText.Text = "RUNNING  /  " + (report.RunningComponents.Count == 0
+            ? "No recognized runtime process detected"
+            : string.Join(", ", report.RunningComponents));
+        VrHeadsetText.Text = "HEADSET  /  " + report.Display.Headset;
+        VrDisplayTimingText.Text = $"REFRESH / RENDER SCALE  /  {report.Display.RefreshRate}  /  {report.Display.RenderScale}";
+        VrMotionText.Text = "MOTION REPROJECTION  /  " + report.Display.MotionReprojection;
+        VrMotionText.ToolTip = report.Display.Source;
+        VrLayersText.Text = "IMPLICIT LAYERS  /  " + (report.ActiveImplicitLayers.Count == 0
+            ? "None active"
+            : string.Join(", ", report.ActiveImplicitLayers.Select(layer => $"{layer.Name} ({layer.Scope})")));
+        VrLayersText.ToolTip = report.ActiveImplicitLayers.Count == 0
+            ? "No enabled implicit OpenXR layer registration was found."
+            : string.Join(Environment.NewLine, report.ActiveImplicitLayers.Select(layer => $"{layer.Name} / {layer.ManifestPath}"));
+        VrOverridesText.Text = "ENVIRONMENT OVERRIDES  /  " + (report.EnvironmentOverrides.Count == 0
+            ? "NONE"
+            : string.Join("  |  ", report.EnvironmentOverrides));
+        VrOverridesText.ToolTip = VrOverridesText.Text;
+        var launchers = Enum.GetValues<VrRuntimePreference>()
+            .Where(runtime => runtime != VrRuntimePreference.None)
+            .Select(runtime => _vrRuntimeLauncher.CheckAvailability(runtime))
+            .Where(item => item.Available)
+            .Select(item => item.Runtime + (item.AlreadyRunning ? " (running)" : string.Empty))
+            .ToArray();
+        VrInstalledRuntimesText.Text = "AVAILABLE LAUNCHERS  /  " + (launchers.Length == 0 ? "None detected" : string.Join(", ", launchers));
+    }
+
+    private void UpdateOnlineHealthDisplay(MsfsOnlineHealthReport report)
+    {
+        OnlineHealthSummaryText.Text = report.Health.ToString().ToUpperInvariant() + "  /  " + report.Summary;
+        OnlineHealthSummaryText.Foreground = HealthBrush(report.Health);
+        OnlineHealthGrid.ItemsSource = report.Items;
+        RepairOnlineServicesButton.IsEnabled = !_coordinator.IsRunning && AdminService.IsAdministrator();
+    }
+
+    private async void RepairOnlineServicesButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coordinator.IsRunning)
+        {
+            MessageBox.Show("Close MSFS before repairing online-service readiness.", "MSFS online services", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (!AdminService.IsAdministrator())
+        {
+            MessageBox.Show("Run VR Auto-Optimizer as administrator to use Safe Repair.", "Administrator access required", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        if (MessageBox.Show(
+                "Safe Repair will flush the Windows DNS cache and request startup only for existing, non-disabled Xbox support services. It will not reset or reinstall Gaming Services. Continue?",
+                "Safe MSFS online-services repair", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        RepairOnlineServicesButton.IsEnabled = false;
+        OnlineHealthSummaryText.Text = "REPAIRING  /  Flushing DNS and checking Xbox support services…";
+        try
+        {
+            _lastOnlineHealth = await _onlineServicesHealth.RepairSafeAsync();
+            UpdateOnlineHealthDisplay(_lastOnlineHealth);
+            AppendStatus("Safe MSFS online-services repair completed and readiness was rechecked.");
+        }
+        catch (Exception exception)
+        {
+            OnlineHealthSummaryText.Text = "REPAIR FAILED  /  " + exception.Message;
+            OnlineHealthSummaryText.Foreground = (Brush)FindResource("RedBrush");
+            AppendStatus("MSFS online-services repair failed: " + exception.Message);
+        }
+        finally
+        {
+            RepairOnlineServicesButton.IsEnabled = !_coordinator.IsRunning && AdminService.IsAdministrator();
+        }
+    }
+
+    private void OpenGamingServicesRepairButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(
+                "Open Microsoft's official Gaming Services Repair Tool page in your default browser? Nothing will be downloaded or run automatically.",
+                "Microsoft Gaming Services Repair Tool", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+        try
+        {
+            Process.Start(new ProcessStartInfo("https://aka.ms/GamingRepairTool") { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("The Microsoft repair page could not be opened: " + exception.Message,
+                "Microsoft Gaming Services Repair Tool", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void OpenMsfsStatusButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(MsfsOfficialServiceStatusClient.StatusPageUrl) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("The official MSFS status page could not be opened: " + exception.Message,
+                "MSFS online-services status", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private static PreflightItem BuildOnlineServicesPreflightItem(MsfsOnlineHealthReport report) =>
+        new("MSFS online services",
+            report.Health == DiagnosticHealth.Ready ? PreflightStatus.Ready : PreflightStatus.Warning,
+            report.Summary + (report.Health == DiagnosticHealth.Ready
+                ? string.Empty
+                : " Offline flying remains available; open Diagnostics to review or repair these items."));
+
+    private async Task RefreshPerformanceHistoryAsync()
+    {
+        var sessions = await _performanceHistoryStore.LoadAsync();
+        _performanceTrend = PerformanceSessionAnalyzer.BuildTrend(sessions);
+        PerformanceHistoryGrid.ItemsSource = _performanceTrend.Reverse().ToArray();
+        RedrawPerformanceTrend();
+        var changes = _performanceTrend.Where(entry => entry.Changes != "—").ToArray();
+        PerformanceTrendChangesText.Text = changes.Length == 0
+            ? "VERSION / PROFILE CHANGES  /  None recorded"
+            : "VERSION / PROFILE CHANGES  /  " + string.Join("   •   ", changes.Select(entry => $"{entry.StartedLabel}: {entry.Changes}"));
+        var comparison = PerformanceSessionAnalyzer.CompareLatestMatching(sessions);
+        if (sessions.Count == 0)
+        {
+            PerformanceComparisonText.Text = "No completed monitored sessions have been recorded yet.";
+            return;
+        }
+        if (comparison is null)
+        {
+            var latest = sessions[0];
+            PerformanceComparisonText.Text = $"LATEST  /  {latest.Simulator} / {latest.Profile} / {latest.StartedLabel}\nA second completed monitored session with the same simulator and profile is required for comparison.";
+            return;
+        }
+
+        PerformanceComparisonText.Text =
+            $"LATEST {comparison.Latest.StartedLabel}  vs  BASELINE {comparison.Baseline.StartedLabel}\n" +
+            $"AVG FPS {Delta(comparison.AverageFpsDelta, "0.0")}  /  1% LOW {Delta(comparison.OnePercentLowDelta, "0.0")}  /  " +
+            $"MAIN THREAD {Delta(comparison.MainThreadMsDelta, "0.0", " ms")}  /  " +
+            $"STUTTERS/MIN {Delta(comparison.StuttersPerMinuteDelta, "0.0")}  /  SPIKES/MIN {Delta(comparison.CpuSpikesPerMinuteDelta, "0.0")}";
+    }
+
+    private void BeginPerformanceSession(int processId)
+    {
+        lock (_performanceSessionGate)
+        {
+            _performanceSessionSamples.Clear();
+            _performanceSessionStartedAt = DateTimeOffset.Now;
+            _performanceSessionSimulator = (SimulatorCombo.SelectedItem as DetectedSimulator)?.Name ?? "Flight simulator";
+            _performanceSessionProfile = _config.Options.Profile.ToString();
+            _performanceSessionSimulatorVersion = ReadProcessVersion(processId);
+            var drivers = GpuDriverInfoReader.Read();
+            _performanceSessionGpuDriverVersion = drivers.Count == 0
+                ? "Unknown"
+                : string.Join(" | ", drivers.Select(driver => $"{driver.Vendor} {driver.DisplayVersion}"));
+            var version = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version;
+            _performanceSessionOptimizerVersion = version is null ? "Unknown" : $"{version.Major}.{version.Minor}.{version.Build}";
+        }
+    }
+
+    private void CancelPerformanceSession()
+    {
+        lock (_performanceSessionGate)
+        {
+            _performanceSessionSamples.Clear();
+            _performanceSessionStartedAt = null;
+        }
+    }
+
+    private async Task CompletePerformanceSessionAsync()
+    {
+        PerformanceSessionSummary? summary;
+        lock (_performanceSessionGate)
+        {
+            summary = _performanceSessionStartedAt.HasValue
+                ? PerformanceSessionAnalyzer.Summarize(_performanceSessionStartedAt.Value, DateTimeOffset.Now,
+                    _performanceSessionSimulator, _performanceSessionProfile, _performanceSessionSamples.ToArray(),
+                    _performanceSessionSimulatorVersion, _performanceSessionGpuDriverVersion, _performanceSessionOptimizerVersion)
+                : null;
+            _performanceSessionStartedAt = null;
+            _performanceSessionSamples.Clear();
+        }
+        if (summary is null) return;
+        await _performanceHistoryStore.AppendAsync(summary);
+        AppendStatus($"Performance history saved: {summary.Simulator}, {summary.DurationMinutes:0.0} minutes, {summary.FpsSampleCount} FPS sample(s).");
+        await RefreshPerformanceHistoryAsync();
+    }
+
+    private Brush HealthBrush(DiagnosticHealth health) => (Brush)FindResource(health switch
+    {
+        DiagnosticHealth.Ready => "GreenBrush",
+        DiagnosticHealth.Review => "AccentBrush",
+        _ => "RedBrush"
+    });
+
+    private static string Delta(double? value, string format, string suffix = "") =>
+        value.HasValue ? $"{value.Value.ToString("+" + format + ";-" + format + ";0")}{suffix}" : "—";
+
     private IReadOnlyList<PreflightItem> BuildPlannedActionItems(SimulatorDefinition simulator)
     {
         var selectedApplications = _applications.Where(item => item.Selected && item.CanStop).ToArray();
         var restartCount = selectedApplications.Count(item =>
             item.IsOneDrive || item.AfterFlightAction == ApplicationAfterFlightAction.Restart);
         var leaveClosedCount = selectedApplications.Length - restartCount;
-        var selectedServices = _services.Count(item => item.Selected && item.CanStop);
+        var selectedServices = _services.Where(item => item.Selected && item.CanStop).ToArray();
+        var manualRestartApplications = selectedApplications.Where(item => !item.CanRestartAfterFlight).ToArray();
+        var linkedServices = selectedServices.Where(item => item.HasDependencyLinks).ToArray();
         var runtime = _config.Options.VrRuntime == VrRuntimePreference.None
             ? "no separately launched VR runtime"
             : _config.Options.VrRuntime.ToString();
@@ -354,19 +717,26 @@ public partial class MainWindow : Window
         if (_config.Options.UseMsfs2024FastLaunch && (simulator.Id is "msfs2024-steam" or "msfs2024-store")) tuning.Add("MSFS FastLaunch");
         if (_config.Options.Profile == OptimizationProfile.Aggressive) tuning.Add("selected Aggressive adjustments");
 
-        return
-        [
+        var items = new List<PreflightItem>
+        {
             new("Planned launch", PreflightStatus.Action,
                 $"{_config.SessionMode} {_config.Options.Profile} session will launch {simulator.Name} with {runtime}."),
             new("Applications", PreflightStatus.Action,
                 $"{selectedApplications.Length} selected application(s) will close: {restartCount} will restart after the flight and {leaveClosedCount} will remain closed."),
             new("Services", PreflightStatus.Action,
-                selectedServices == 0
+                selectedServices.Length == 0
                     ? "No services will be stopped."
-                    : $"{selectedServices} selected service(s) will stop temporarily and return to their recorded state after the flight."),
+                    : $"{selectedServices.Length} selected service(s) will stop temporarily and return to their recorded state after the flight."),
             new("Performance actions", PreflightStatus.Action,
                 tuning.Count == 0 ? "No optional performance actions are selected." : string.Join(", ", tuning) + ".")
-        ];
+        };
+        if (manualRestartApplications.Length > 0)
+            items.Add(new("Restart warning", PreflightStatus.Warning,
+                "No reliable restart command was detected for: " + string.Join(", ", manualRestartApplications.Select(item => item.DisplayName)) + ". These applications will remain closed and must be restarted manually."));
+        if (linkedServices.Length > 0)
+            items.Add(new("Service dependency review", PreflightStatus.Warning,
+                string.Join("  |  ", linkedServices.Select(item => $"{item.DisplayName}: {item.DependencyDetails.Replace(Environment.NewLine, "; ")}"))));
+        return items;
     }
 
     private async Task RunSessionAsync(SimulatorDefinition simulator, OptimizerOptions options, CancellationToken cancellationToken)
@@ -626,6 +996,7 @@ public partial class MainWindow : Window
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         SavedProfileCombo.Text = _config.ActiveSavedProfileName ?? "";
+        LoadProfileAssociations(_config.ActiveSavedProfileName);
     }
 
     private string SelectedProfileName() =>
@@ -633,7 +1004,17 @@ public partial class MainWindow : Window
 
     private void ProfileSetting_Changed(object sender, RoutedEventArgs e) => MarkProfileDirty();
 
-    private void SavedProfileCombo_Changed(object sender, RoutedEventArgs e) => UpdateProfileStatus();
+    private void SavedProfileCombo_Changed(object sender, RoutedEventArgs e)
+    {
+        if (SavedProfileCombo.SelectedItem is string selected) LoadProfileAssociations(selected);
+        UpdateProfileStatus();
+    }
+
+    private void ProfileAssociation_Changed(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        if (_loadingProfileAssociations) return;
+        MarkProfileDirty();
+    }
 
     private void MarkProfileDirty()
     {
@@ -650,9 +1031,22 @@ public partial class MainWindow : Window
         var entered = SelectedProfileName();
         var enteredProfileExists = _config.SavedProfiles.Any(profile =>
             profile.Name.Equals(entered, StringComparison.OrdinalIgnoreCase));
+        var enteredProfile = _config.SavedProfiles.FirstOrDefault(profile =>
+            profile.Name.Equals(entered, StringComparison.OrdinalIgnoreCase));
         var enteredIsActive = !string.IsNullOrWhiteSpace(active)
             && entered.Equals(active, StringComparison.OrdinalIgnoreCase);
         var running = _coordinator.IsRunning;
+        if (enteredProfile is not null)
+        {
+            CaptureCurrentControls();
+            var differences = UserProfileStore.Diff(_config, enteredProfile, ReadProfileAssociations());
+            ProfileDifferencesGrid.ItemsSource = differences;
+            if (enteredIsActive) _profileDirty = differences.Count > 0;
+        }
+        else
+        {
+            ProfileDifferencesGrid.ItemsSource = null;
+        }
 
         if (enteredProfileExists && !enteredIsActive)
         {
@@ -732,6 +1126,12 @@ public partial class MainWindow : Window
 
     private async void CheckUpdateButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_coordinator.IsRunning)
+        {
+            MessageBox.Show("Finish or restore the current flight session before installing an update.",
+                "Update unavailable during session", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         CheckUpdateButton.IsEnabled = false;
         CheckUpdateButton.Content = "CHECKING…";
         try
@@ -742,16 +1142,48 @@ public partial class MainWindow : Window
             if (update.IsUpdateAvailable)
             {
                 AppendStatus($"Update available: VR Auto-Optimizer {update.LatestVersion} (installed {update.CurrentVersion}).");
-                var answer = MessageBox.Show(
-                    $"VR Auto-Optimizer {update.LatestVersion} is available.\n\n" +
-                    $"Installed version: {update.CurrentVersion}\n" +
-                    $"Latest release: {update.ReleaseName}\n\n" +
-                    "Open the official GitHub release page?",
-                    "Update available",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Information);
-                if (answer == MessageBoxResult.Yes)
-                    Process.Start(new ProcessStartInfo(update.ReleaseUri.AbsoluteUri) { UseShellExecute = true });
+                if (update.VerifiedInstaller is null)
+                {
+                    var openRelease = MessageBox.Show(
+                        $"VR Auto-Optimizer {update.LatestVersion} is available, but this release does not provide both an installer and its SHA-256 checksum.\n\n" +
+                        "For safety, the optimizer will not download it automatically. Open the official GitHub release page?",
+                        "Manual update required", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    if (openRelease == MessageBoxResult.Yes)
+                        Process.Start(new ProcessStartInfo(update.ReleaseUri.AbsoluteUri) { UseShellExecute = true });
+                }
+                else
+                {
+                    var answer = MessageBox.Show(
+                        $"VR Auto-Optimizer {update.LatestVersion} is available.\n\n" +
+                        $"Installed version: {update.CurrentVersion}\n" +
+                        $"Latest release: {update.ReleaseName}\n" +
+                        $"Installer: {update.VerifiedInstaller.Name}\n\n" +
+                        "Yes: download and validate the installer in the app.\n" +
+                        "No: open the GitHub release page instead.",
+                        "Verified update available", MessageBoxButton.YesNoCancel, MessageBoxImage.Information);
+                    if (answer == MessageBoxResult.No)
+                        Process.Start(new ProcessStartInfo(update.ReleaseUri.AbsoluteUri) { UseShellExecute = true });
+                    else if (answer == MessageBoxResult.Yes)
+                    {
+                        var progress = new Progress<double>(value =>
+                            CheckUpdateButton.Content = $"DOWNLOADING {value * 100:0}%");
+                        var download = await _updateDownloader.DownloadAsync(
+                            update.VerifiedInstaller, _paths.UpdateDirectory, progress);
+                        AppendStatus($"Verified update downloaded: {download.Path}; SHA-256 {download.Sha256}.");
+                        var install = MessageBox.Show(
+                            $"The installer downloaded successfully and its SHA-256 checksum matches the official release.\n\n" +
+                            $"SHA-256: {download.Sha256}\n\n" +
+                            "Run the installer now? VR Auto-Optimizer will close after it starts.",
+                            "Update verified", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                        if (install == MessageBoxResult.Yes)
+                        {
+                            Process.Start(new ProcessStartInfo(download.Path) { UseShellExecute = true });
+                            _allowClose = true;
+                            Application.Current.Shutdown();
+                            return;
+                        }
+                    }
+                }
             }
             else
             {
@@ -789,6 +1221,8 @@ public partial class MainWindow : Window
 
     private void SimulatorCombo_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
+        if (ProfileSimulatorAssociationText is not null)
+            ProfileSimulatorAssociationText.Text = "SIMULATOR  /  " + ((SimulatorCombo.SelectedItem as DetectedSimulator)?.Definition.Id ?? "—");
         UpdateSimulatorOptionAvailability();
         MarkProfileDirty();
         if (MainTabs is not null && ReferenceEquals(MainTabs.SelectedItem, DisplaySettingsTab))
@@ -818,7 +1252,7 @@ public partial class MainWindow : Window
         try
         {
             CaptureCurrentControls();
-            var saved = UserProfileStore.SaveOrReplace(_config, SavedProfileCombo.Text);
+            var saved = UserProfileStore.SaveOrReplace(_config, SavedProfileCombo.Text, ReadProfileAssociations());
             await SaveConfigAsync();
             RefreshSavedProfiles();
             _profileDirty = false;
@@ -848,6 +1282,7 @@ public partial class MainWindow : Window
             {
                 var simulatorName = (SimulatorCombo.SelectedItem as DetectedSimulator)?.Name ?? "Flight simulator";
                 _toolbarTelemetry.BeginSession(simulatorName, _config.Options.UseOpenXrTurboMode);
+                BeginPerformanceSession(processId.Value);
                 _dashboardHistory.Clear();
                 DashFps.Text = "—";
                 DashAverageFps.Text = "—";
@@ -864,6 +1299,7 @@ public partial class MainWindow : Window
                 }
                 catch (Exception exception)
                 {
+                    CancelPerformanceSession();
                     _toolbarTelemetry.EndSession("Performance monitor could not start: " + exception.Message);
                     DashboardStatusText.Text = "MONITOR ERROR — " + exception.Message;
                     AppendStatus("Performance dashboard could not start: " + exception.Message);
@@ -872,6 +1308,7 @@ public partial class MainWindow : Window
             else
             {
                 await _dashboardMonitor.StopAsync();
+                if (!processId.HasValue) await CompletePerformanceSessionAsync();
                 _toolbarTelemetry.EndSession(processId.HasValue
                     ? "Performance monitoring is disabled for this session"
                     : "Flight session complete");
@@ -884,6 +1321,14 @@ public partial class MainWindow : Window
 
     private void DashboardSampleReady(PerformanceTelemetrySample sample)
     {
+        lock (_performanceSessionGate)
+        {
+            if (_performanceSessionStartedAt.HasValue)
+            {
+                _performanceSessionSamples.Add(sample);
+                if (_performanceSessionSamples.Count > 120_000) _performanceSessionSamples.RemoveAt(0);
+            }
+        }
         _toolbarTelemetry.Publish(sample);
         Dispatcher.BeginInvoke(() => UpdateDashboard(sample));
     }
@@ -968,6 +1413,12 @@ public partial class MainWindow : Window
                 DisplaySettingsScroll.ScrollToTop();
                 RefreshDisplaySettingsPanel();
             });
+        else if (ReferenceEquals(MainTabs.SelectedItem, DiagnosticsTab))
+            Dispatcher.BeginInvoke(async () =>
+            {
+                DiagnosticsScroll.ScrollToTop();
+                await RefreshDiagnosticsAsync();
+            });
     }
 
     private void UpdateDashboard(PerformanceTelemetrySample sample)
@@ -1006,6 +1457,58 @@ public partial class MainWindow : Window
 
     private void DashboardGraph_SizeChanged(object sender, SizeChangedEventArgs e) => RedrawDashboardGraphs();
 
+    private void PerformanceTrendGraph_SizeChanged(object sender, SizeChangedEventArgs e) => RedrawPerformanceTrend();
+
+    private void RedrawPerformanceTrend()
+    {
+        if (PerformanceTrendCanvas is null) return;
+        PerformanceTrendCanvas.Children.Clear();
+        var width = PerformanceTrendCanvas.ActualWidth;
+        var height = PerformanceTrendCanvas.ActualHeight;
+        if (_performanceTrend.Count == 0 || width <= 0 || height <= 0) return;
+        var maximum = Math.Max(60, Math.Ceiling(_performanceTrend
+            .SelectMany(entry => new[] { entry.Session.AverageFps, entry.Session.OnePercentLowFps })
+            .Where(value => value.HasValue).Select(value => value!.Value).DefaultIfEmpty(60).Max() / 30) * 30);
+        PerformanceTrendScaleText.Text = $"0–{maximum:0} FPS";
+
+        AddLine(entry => entry.Session.AverageFps, (Brush)FindResource("CyanBrush"), 2.2);
+        AddLine(entry => entry.Session.OnePercentLowFps, (Brush)FindResource("GreenBrush"), 1.8);
+        for (var index = 1; index < _performanceTrend.Count; index++)
+        {
+            if (_performanceTrend[index].Changes == "—") continue;
+            var x = _performanceTrend.Count == 1 ? 0 : index * width / (_performanceTrend.Count - 1);
+            var marker = new System.Windows.Shapes.Line
+            {
+                X1 = x, X2 = x, Y1 = 0, Y2 = height,
+                Stroke = (Brush)FindResource("AccentBrush"),
+                StrokeThickness = 1.2,
+                StrokeDashArray = new DoubleCollection([4, 3]),
+                ToolTip = _performanceTrend[index].Changes
+            };
+            PerformanceTrendCanvas.Children.Add(marker);
+        }
+
+        void AddLine(Func<PerformanceTrendEntry, double?> selector, Brush brush, double thickness)
+        {
+            var points = new PointCollection();
+            for (var index = 0; index < _performanceTrend.Count; index++)
+            {
+                var value = selector(_performanceTrend[index]);
+                if (!value.HasValue) continue;
+                var x = _performanceTrend.Count == 1 ? width / 2 : index * width / (_performanceTrend.Count - 1);
+                var y = height - Math.Clamp(value.Value / maximum, 0, 1) * height;
+                points.Add(new Point(x, y));
+            }
+            if (points.Count == 0) return;
+            PerformanceTrendCanvas.Children.Add(new System.Windows.Shapes.Polyline
+            {
+                Points = points,
+                Stroke = brush,
+                StrokeThickness = thickness
+            });
+        }
+    }
+
     private void RedrawDashboardGraphs()
     {
         var history = _dashboardHistory.ToArray();
@@ -1029,6 +1532,20 @@ public partial class MainWindow : Window
             points.Add(new Point(x, y));
         }
         return points;
+    }
+
+    private static string ReadProcessVersion(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            var information = process.MainModule?.FileVersionInfo;
+            return information?.ProductVersion ?? information?.FileVersion ?? "Unknown";
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or NotSupportedException)
+        {
+            return "Unknown";
+        }
     }
 
     private static string FormatMetric(double? value, string format) => value?.ToString(format) ?? "—";
@@ -1099,6 +1616,145 @@ public partial class MainWindow : Window
         _profileDirty = false;
         UpdateProfileStatus();
         AppendStatus($"Deleted user profile '{name}'. Current on-screen settings were left unchanged.");
+    }
+
+    private async void DuplicateProfileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coordinator.IsRunning) return;
+        var source = SelectedProfileName();
+        if (!_config.SavedProfiles.Any(profile => profile.Name.Equals(source, StringComparison.OrdinalIgnoreCase)))
+        {
+            MessageBox.Show("Choose a saved profile first.", "Duplicate profile", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var prompt = new ProfileNameWindow("Duplicate profile", $"Enter a name for the copy of '{source}'.", source + " Copy") { Owner = this };
+        if (prompt.ShowDialog() != true) return;
+        try
+        {
+            var duplicate = UserProfileStore.Duplicate(_config, source, prompt.ProfileName);
+            await SaveConfigAsync();
+            RefreshSavedProfiles();
+            SavedProfileCombo.SelectedItem = duplicate.Name;
+            AppendStatus($"Duplicated user profile '{source}' as '{duplicate.Name}'.");
+        }
+        catch (ArgumentException exception)
+        {
+            MessageBox.Show(exception.Message, "Duplicate profile", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private async void RenameProfileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coordinator.IsRunning) return;
+        var source = SelectedProfileName();
+        if (!_config.SavedProfiles.Any(profile => profile.Name.Equals(source, StringComparison.OrdinalIgnoreCase)))
+        {
+            MessageBox.Show("Choose a saved profile first.", "Rename profile", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var prompt = new ProfileNameWindow("Rename profile", $"Enter a new name for '{source}'.", source) { Owner = this };
+        if (prompt.ShowDialog() != true) return;
+        try
+        {
+            var renamed = UserProfileStore.Rename(_config, source, prompt.ProfileName);
+            await SaveConfigAsync();
+            RefreshSavedProfiles();
+            SavedProfileCombo.SelectedItem = renamed.Name;
+            UpdateProfileStatus();
+            AppendStatus($"Renamed user profile '{source}' to '{renamed.Name}'.");
+        }
+        catch (ArgumentException exception)
+        {
+            MessageBox.Show(exception.Message, "Rename profile", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private async void ExportProfileButton_Click(object sender, RoutedEventArgs e)
+    {
+        var name = SelectedProfileName();
+        var profile = _config.SavedProfiles.FirstOrDefault(item => item.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (profile is null)
+        {
+            MessageBox.Show("Choose a saved profile first.", "Export profile", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        var safeName = string.Concat(profile.Name.Select(character => Path.GetInvalidFileNameChars().Contains(character) ? '_' : character));
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Export VR Auto-Optimizer profile",
+            Filter = "VR Auto-Optimizer profile (*.vrprofile.json)|*.vrprofile.json|JSON file (*.json)|*.json",
+            FileName = safeName + ".vrprofile.json",
+            AddExtension = true,
+            DefaultExt = ".vrprofile.json"
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            await UserProfileStore.ExportAsync(profile, dialog.FileName);
+            AppendStatus($"Exported user profile '{profile.Name}' to {dialog.FileName}.");
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("The profile could not be exported: " + exception.Message, "Export profile", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private async void ImportProfileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coordinator.IsRunning) return;
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Import VR Auto-Optimizer profile",
+            Filter = "VR Auto-Optimizer profile (*.vrprofile.json;*.json)|*.vrprofile.json;*.json|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        try
+        {
+            var imported = await UserProfileStore.ReadImportAsync(dialog.FileName);
+            var exists = _config.SavedProfiles.Any(profile => profile.Name.Equals(imported.Name, StringComparison.OrdinalIgnoreCase));
+            if (exists && MessageBox.Show($"A profile named '{imported.Name}' already exists. Replace it with the imported profile?",
+                    "Import profile", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            imported = UserProfileStore.Import(_config, imported, replace: exists);
+            await SaveConfigAsync();
+            RefreshSavedProfiles();
+            SavedProfileCombo.SelectedItem = imported.Name;
+            AppendStatus($"Imported user profile '{imported.Name}' from {dialog.FileName}. Choose Load to apply it.");
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show("The profile could not be imported: " + exception.Message, "Import profile", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private ProfileAssociations ReadProfileAssociations() => new()
+    {
+        SimulatorId = (SimulatorCombo.SelectedItem as DetectedSimulator)?.Definition.Id ?? _config.SelectedSimulatorId ?? "",
+        Aircraft = ProfileAircraftBox.Text.Trim(),
+        VrHeadset = ProfileHeadsetBox.Text.Trim(),
+        MonitorConfiguration = ProfileMonitorBox.Text.Trim()
+    };
+
+    private void LoadProfileAssociations(string? profileName)
+    {
+        if (ProfileAircraftBox is null) return;
+        var profile = string.IsNullOrWhiteSpace(profileName) ? null : _config.SavedProfiles.FirstOrDefault(item =>
+            item.Name.Equals(profileName, StringComparison.OrdinalIgnoreCase));
+        _loadingProfileAssociations = true;
+        try
+        {
+            var associations = profile?.Associations ?? new ProfileAssociations();
+            ProfileAircraftBox.Text = associations.Aircraft;
+            ProfileHeadsetBox.Text = associations.VrHeadset;
+            ProfileMonitorBox.Text = associations.MonitorConfiguration;
+            var simulatorId = associations.SimulatorId;
+            if (string.IsNullOrWhiteSpace(simulatorId)) simulatorId = profile?.SelectedSimulatorId ?? _config.SelectedSimulatorId ?? "—";
+            ProfileSimulatorAssociationText.Text = "SIMULATOR  /  " + simulatorId;
+        }
+        finally
+        {
+            _loadingProfileAssociations = false;
+        }
     }
 
     private void CaptureCurrentControls()
@@ -1343,9 +1999,18 @@ public partial class MainWindow : Window
                 _config.ApplicationSelections[application.ProcessName] = application.Selected;
                 break;
             case ServiceCandidate service:
-                service.Selected = selected
+                var allowServiceSelection = selected
                     && service.CanStop
                     && ProfileCombo.SelectedItem is OptimizationProfile.Aggressive;
+                if (allowServiceSelection && service.HasDependencyLinks)
+                {
+                    var decision = MessageBox.Show(
+                        $"Review the Windows service relationships before stopping {service.DisplayName}:\n\n{service.DependencyDetails}\n\nThe optimizer will restore the service after the flight, but related features may be unavailable during the session. Select this service?",
+                        "Service dependency warning", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                    allowServiceSelection = decision == MessageBoxResult.Yes;
+                    if (!allowServiceSelection) checkBox.IsChecked = false;
+                }
+                service.Selected = allowServiceSelection;
                 _config.ServiceSelections[service.ServiceName] = service.Selected;
                 break;
             default:
@@ -1384,6 +2049,45 @@ public partial class MainWindow : Window
 
         await SaveSelectionPreferencesAsync();
         MarkProfileDirty();
+    }
+
+    private async void TestRestartButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_coordinator.IsRunning) return;
+        if (sender is not System.Windows.Controls.Button { DataContext: RunningAppCandidate application } button) return;
+        if (!application.CanTestRestart)
+        {
+            MessageBox.Show("Set After Flight to Restart before testing this application.",
+                "Test application restart", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (MessageBox.Show(
+                $"This test will close every running instance of {application.DisplayName} and immediately try to relaunch it.\n\nSave any work in that application before continuing. Start the test now?",
+                "Test application restart", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        button.IsEnabled = false;
+        var originalContent = button.Content;
+        button.Content = "…";
+        try
+        {
+            var result = await _applicationRestartTester.TestAsync(application);
+            AppendStatus("Restart test: " + result.Detail);
+            MessageBox.Show(result.Detail, "Test application restart", MessageBoxButton.OK,
+                result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (Exception exception)
+        {
+            AppendStatus("Restart test failed: " + exception.Message);
+            MessageBox.Show("The restart test failed: " + exception.Message,
+                "Test application restart", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            button.Content = originalContent;
+            button.IsEnabled = application.CanTestRestart;
+        }
     }
 
     private async Task SaveSelectionPreferencesAsync()
@@ -1517,6 +2221,7 @@ public partial class MainWindow : Window
         ContentCreatorCheck.IsEnabled = !running;
         DashboardEnabledCheck.IsEnabled = !running;
         DashboardCsvCheck.IsEnabled = !running;
+        RepairOnlineServicesButton.IsEnabled = !running && AdminService.IsAdministrator();
         UpdateProfileStatus();
         RefreshToolbarPanelStatus();
         if (!running)
