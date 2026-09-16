@@ -17,7 +17,7 @@ $installerScript = Join-Path $root 'installer\VR-Auto-Optimizer.iss'
 if (Test-Path -LiteralPath $publish) { Remove-Item -LiteralPath $publish -Recurse -Force }
 New-Item -ItemType Directory -Path $publish, $release -Force | Out-Null
 
-dotnet restore $project -r win-x64
+dotnet restore $project -r win-x64 --source https://api.nuget.org/v3/index.json
 if ($LASTEXITCODE -ne 0) { throw 'Restore failed.' }
 dotnet publish $project -c Release -r win-x64 --self-contained true --no-restore -o $publish `
     -p:Version=$Version -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
