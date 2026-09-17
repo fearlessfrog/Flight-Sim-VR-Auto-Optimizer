@@ -13,9 +13,16 @@ $publish = Join-Path $root "outputs\publish-$Version"
 $release = Join-Path $root 'outputs\release'
 $project = Join-Path $root 'SimVROptimizer.App\SimVROptimizer.App.csproj'
 $installerScript = Join-Path $root 'installer\VR-Auto-Optimizer.iss'
+$turboBuild = Join-Path $root 'TurboLayer\build.ps1'
+$turboDll = Join-Path $root 'TurboLayer\bin\VR_Optimizer_Turbo_Layer.dll'
 
 if (Test-Path -LiteralPath $publish) { Remove-Item -LiteralPath $publish -Recurse -Force }
 New-Item -ItemType Directory -Path $publish, $release -Force | Out-Null
+
+if (-not (Test-Path -LiteralPath $turboDll)) {
+    & $turboBuild
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $turboDll)) { throw 'Turbo layer build failed.' }
+}
 
 dotnet restore $project -r win-x64 --source https://api.nuget.org/v3/index.json
 if ($LASTEXITCODE -ne 0) { throw 'Restore failed.' }

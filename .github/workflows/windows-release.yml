@@ -22,6 +22,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - uses: ilammy/msvc-dev-cmd@v1
       - name: Resolve version
         id: version
         shell: pwsh
@@ -34,6 +35,9 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
+      - name: Build bundled OpenXR Turbo layer
+        shell: pwsh
+        run: .\TurboLayer\build.ps1
       - name: Run automated tests
         shell: pwsh
         run: dotnet run --project .\SimVROptimizer.Tests\SimVROptimizer.Tests.csproj --configuration Release --configfile .\NuGet.Config

@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.4.0-rc.2 — Release candidate
+## 2.4.0-rc.3 — Release candidate
 
 - Added flight-session history, performance trend graphs, session comparisons, and automatic simulator, GPU-driver and profile-change markers.
 - Added read-only CPU/GPU balance recommendations for DLSS mode, render scaling and stable frame-rate targets, with safe `UserCfg.opt` backup support.
