@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.1 — 2026-09-26
+
+- Added profile-owned companion-app preloading for Active Sky, SayIntentions, REX Core Atmos and other external tools.
+- Added **Before Simulator**, **After Simulator Starts** and SimConnect-confirmed **Ready to Fly** launch stages with configurable launch delays and a bounded readiness fallback.
+- Added direct executable selection, optional administrator launch, duplicate-process prevention and per-app **Leave Running** or **Close on Session End** cleanup.
+- Companion apps are now stored with named flight profiles and restored when the active profile is reapplied at startup.
+- Added a one-click switch to pause or resume CPU-spike and frame-stutter recording during simulator loading while keeping other dashboard telemetry active.
+- Clarified the Custom Apps workflow, removed the unused command-line Arguments field and fixed its launch/cleanup dropdown controls.
+- Expanded automated coverage to 59 passing tests.
+
 ## 2.4.0 — 2026-09-17
 
 - Added flight-session history, performance trend graphs, session comparisons, and automatic simulator, GPU-driver and profile-change markers.

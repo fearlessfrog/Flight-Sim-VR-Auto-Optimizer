@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -22,6 +23,7 @@ public partial class MainWindow : Window
     private readonly PerformanceHistoryStore _performanceHistoryStore;
     private readonly RecoveryShortcutService _recoveryShortcuts;
     private readonly ApplicationRestartTester _applicationRestartTester = new();
+    private readonly ObservableCollection<CompanionApplicationRule> _companionApplications = [];
     private AppConfig _config = new();
     private IReadOnlyList<RunningAppCandidate> _applications = [];
     private IReadOnlyList<ServiceCandidate> _services = [];
@@ -51,6 +53,7 @@ public partial class MainWindow : Window
     private MsfsOnlineHealthReport? _lastOnlineHealth;
     private int _dashboardStutterCount;
     private int _dashboardCpuSpikeCount;
+    private bool _anomalyTrackingEnabled = true;
     private bool _restartRequiredAfterSession;
     private bool _profileDirty;
     private bool _loadingProfileAssociations;
@@ -70,11 +73,13 @@ public partial class MainWindow : Window
         _performanceHistoryStore = new PerformanceHistoryStore(_paths.PerformanceHistoryFile);
         var optimizer = new TransactionalOptimizer(commands, _paths, logger);
         _vrRuntimeLauncher = new VrRuntimeLauncher(logger);
+        var companionApplicationLauncher = new CompanionApplicationLauncher(logger);
         _coordinator = new SessionCoordinator(
             optimizer,
             new SimulatorLauncher(logger),
             _vrRuntimeLauncher,
-            new XboxSessionCleanup(logger));
+            new XboxSessionCleanup(logger),
+            companionApplicationLauncher);
         _scanner = new SystemScanner(commands);
         _recoveryShortcuts = new RecoveryShortcutService();
         _coordinator.StatusChanged += AppendStatus;
@@ -216,6 +221,7 @@ public partial class MainWindow : Window
                         ProcessNames = _applications.Where(item => item.Selected && item.CanStop).Select(item => item.ProcessName).ToArray(),
                         ServiceNames = _services.Where(item => item.Selected && item.CanStop).Select(item => item.ServiceName).ToArray(),
                         CustomApplications = _config.CustomApplications,
+                        CompanionApplications = _config.CompanionApplications,
                         ApplicationAfterFlightActions = _applications.ToDictionary(
                             item => item.ProcessName,
                             item => item.AfterFlightAction,
@@ -704,6 +710,9 @@ public partial class MainWindow : Window
         var selectedServices = _services.Where(item => item.Selected && item.CanStop).ToArray();
         var manualRestartApplications = selectedApplications.Where(item => !item.CanRestartAfterFlight).ToArray();
         var linkedServices = selectedServices.Where(item => item.HasDependencyLinks).ToArray();
+        var enabledCompanions = _config.CompanionApplications.Where(item => item.Enabled).ToArray();
+        var missingCompanions = enabledCompanions.Where(item =>
+            !File.Exists(Environment.ExpandEnvironmentVariables(item.ExecutablePath.Trim().Trim('"')))).ToArray();
         var runtime = _config.Options.VrRuntime == VrRuntimePreference.None
             ? "no separately launched VR runtime"
             : _config.Options.VrRuntime.ToString();
@@ -727,6 +736,15 @@ public partial class MainWindow : Window
                 selectedServices.Length == 0
                     ? "No services will be stopped."
                     : $"{selectedServices.Length} selected service(s) will stop temporarily and return to their recorded state after the flight."),
+            new("Companion apps", PreflightStatus.Action,
+                enabledCompanions.Length == 0
+                    ? "No companion applications are configured to preload."
+                    : $"{enabledCompanions.Length} companion application(s) will launch automatically; " +
+                      $"{enabledCompanions.Count(item => item.LaunchTiming == CompanionLaunchTiming.BeforeSimulator)} before the simulator, " +
+                      $"{enabledCompanions.Count(item => item.LaunchTiming == CompanionLaunchTiming.AfterSimulatorStarts)} after it starts, and " +
+                      $"{enabledCompanions.Count(item => item.LaunchTiming == CompanionLaunchTiming.ReadyToFly)} when ready to fly. " +
+                      $"{enabledCompanions.Count(item => item.RunAsAdministrator)} request administrator access and " +
+                      $"{enabledCompanions.Count(item => item.CleanupAction == CompanionCleanupAction.CloseOnSessionEnd)} will close after the flight."),
             new("Performance actions", PreflightStatus.Action,
                 tuning.Count == 0 ? "No optional performance actions are selected." : string.Join(", ", tuning) + ".")
         };
@@ -736,6 +754,10 @@ public partial class MainWindow : Window
         if (linkedServices.Length > 0)
             items.Add(new("Service dependency review", PreflightStatus.Warning,
                 string.Join("  |  ", linkedServices.Select(item => $"{item.DisplayName}: {item.DependencyDetails.Replace(Environment.NewLine, "; ")}"))));
+        if (missingCompanions.Length > 0)
+            items.Add(new("Companion app warning", PreflightStatus.Warning,
+                "Executable not found for: " + string.Join(", ", missingCompanions.Select(item =>
+                    string.IsNullOrWhiteSpace(item.Name) ? item.ExecutablePath : item.Name)) + ". These entries will be skipped."));
         return items;
     }
 
@@ -745,7 +767,7 @@ public partial class MainWindow : Window
         try
         {
             SetStateDisplay("SESSION ACTIVE", "CyanBrush");
-            await _coordinator.RunAsync(simulator, options, _applications, _services, cancellationToken);
+            await _coordinator.RunAsync(simulator, options, _applications, _services, _config.CompanionApplications, cancellationToken);
             AppendStatus("Simulator exited; restoration completed.");
             closeApplicationAfterCleanup = ShowRestorationReport(closeApplicationOnCloseReport: true);
         }
@@ -937,6 +959,7 @@ public partial class MainWindow : Window
             EnableOnlineApplicationGuidance = OnlineGuidanceCheck.IsChecked == true
         },
         CustomApplications = ReadCustomApplications(),
+        CompanionApplications = ReadCompanionApplications(),
         ApplicationSelections = new Dictionary<string, bool>(_config.ApplicationSelections, StringComparer.OrdinalIgnoreCase),
         ServiceSelections = new Dictionary<string, bool>(_config.ServiceSelections, StringComparer.OrdinalIgnoreCase),
         ApplicationAfterFlightActions = new Dictionary<string, ApplicationAfterFlightAction>(_config.ApplicationAfterFlightActions, StringComparer.OrdinalIgnoreCase),
@@ -975,6 +998,9 @@ public partial class MainWindow : Window
         CustomRestartBox.Text = string.Join(Environment.NewLine, _config.CustomApplications
             .Where(rule => !string.IsNullOrWhiteSpace(rule.RestartExecutablePath))
             .Select(rule => $"{rule.ProcessName}={rule.RestartExecutablePath}"));
+        _companionApplications.Clear();
+        foreach (var rule in _config.CompanionApplications) _companionApplications.Add(CopyCompanionRule(rule));
+        CompanionAppsGrid.ItemsSource = _companionApplications;
         RefreshSavedProfiles();
         ApplyCpuAwareControlRules();
         UpdateModeDescription();
@@ -1076,7 +1102,7 @@ public partial class MainWindow : Window
         }
 
         ProfileStatusText.Text = string.IsNullOrWhiteSpace(entered)
-            ? "CURRENT SETTINGS / Grid choices are auto-saved; enter a name to create a profile."
+            ? "CURRENT SETTINGS / Enter a profile name, then Save Changes to store companion apps and the complete setup."
             : $"NEW PROFILE / Save current settings as '{entered}'.";
         ProfileStatusText.Foreground = (Brush)FindResource("MutedTextBrush");
         SaveProfileButton.IsEnabled = !running && !string.IsNullOrWhiteSpace(entered);
@@ -1241,9 +1267,75 @@ public partial class MainWindow : Window
     private async void SaveCustomButton_Click(object sender, RoutedEventArgs e)
     {
         _config.CustomApplications = ReadCustomApplications();
+        _config.CompanionApplications = ReadCompanionApplications();
         await SaveConfigAsync();
-        AppendStatus($"Saved {_config.CustomApplications.Count} persistent custom application rule(s).");
+        AppendStatus($"Saved {_config.CustomApplications.Count} close rule(s) and {_config.CompanionApplications.Count} companion preload rule(s).");
         await ScanSystemAsync();
+    }
+
+    private void AddCompanionAppButton_Click(object sender, RoutedEventArgs e)
+    {
+        var lastDirectory = _companionApplications
+            .Select(item => Path.GetDirectoryName(item.ExecutablePath))
+            .LastOrDefault(Directory.Exists);
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Choose a companion application",
+            InitialDirectory = lastDirectory,
+            Filter = "Applications (*.exe)|*.exe|All files (*.*)|*.*",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        AddCompanionApplication(dialog.FileName);
+    }
+
+    private void AddCompanionApplication(string executablePath)
+    {
+        var existing = _companionApplications.FirstOrDefault(item =>
+            item.ExecutablePath.Equals(executablePath, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+        {
+            CompanionAppsGrid.SelectedItem = existing;
+            CompanionAppsGrid.ScrollIntoView(existing);
+            return;
+        }
+
+        var rule = new CompanionApplicationRule
+        {
+            Name = Path.GetFileNameWithoutExtension(executablePath),
+            ExecutablePath = executablePath,
+            RunAsAdministrator = false,
+            LaunchTiming = CompanionLaunchTiming.BeforeSimulator,
+            CleanupAction = CompanionCleanupAction.LeaveRunning
+        };
+        _companionApplications.Add(rule);
+        CompanionAppsGrid.SelectedItem = rule;
+        CompanionAppsGrid.ScrollIntoView(rule);
+        MarkProfileDirty();
+    }
+
+    private void RemoveCompanionAppButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (CompanionAppsGrid.SelectedItem is not CompanionApplicationRule rule) return;
+        _companionApplications.Remove(rule);
+        MarkProfileDirty();
+    }
+
+    private void CompanionAppsGrid_CellEditEnding(object sender, System.Windows.Controls.DataGridCellEditEndingEventArgs e)
+    {
+        if (_applyingConfig) return;
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            CompanionAppsGrid.Items.Refresh();
+            MarkProfileDirty();
+        }));
+    }
+
+    private void CompanionOption_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_applyingConfig || !_uiReady) return;
+        MarkProfileDirty();
     }
 
     private async void SaveProfileButton_Click(object sender, RoutedEventArgs e)
@@ -1257,9 +1349,9 @@ public partial class MainWindow : Window
             RefreshSavedProfiles();
             _profileDirty = false;
             UpdateProfileStatus();
-            AppendStatus($"Saved user profile '{saved.Name}' with the current simulator, options, applications, and services.");
+            AppendStatus($"Saved user profile '{saved.Name}' with the current simulator, options, companion apps, applications, and services.");
             MessageBox.Show(
-                $"User profile '{saved.Name}' was saved successfully.\n\nThe simulator, workflow, VR runtime, optimization settings, application and service choices, after-flight actions, and custom app list have been stored.",
+                $"User profile '{saved.Name}' was saved successfully.\n\nThe simulator, workflow, VR runtime, optimization settings, companion app preload list, application and service choices, after-flight actions, and custom close list have been stored.",
                 "Profile saved successfully",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
@@ -1347,6 +1439,34 @@ public partial class MainWindow : Window
         _toolbarTelemetry.ResetCpuSpikeCounter();
         UpdateDashboardCounterDisplay();
         AppendStatus("Performance dashboard CPU spike counter reset.");
+    }
+
+    private void DashboardAnomalyTrackingButton_Click(object sender, RoutedEventArgs e)
+    {
+        _anomalyTrackingEnabled = !_anomalyTrackingEnabled;
+        _dashboardMonitor.AnomalyTrackingEnabled = _anomalyTrackingEnabled;
+        UpdateAnomalyTrackingDisplay();
+        UpdateDashboardCounterDisplay();
+        AppendStatus(_anomalyTrackingEnabled
+            ? "Frame-time stutter and CPU-spike recording resumed."
+            : "Frame-time stutter and CPU-spike recording paused; other performance monitoring remains active.");
+    }
+
+    private void UpdateAnomalyTrackingDisplay()
+    {
+        DashboardAnomalyTrackingButton.Content = _anomalyTrackingEnabled
+            ? "STUTTER/SPIKE COUNTING / ON"
+            : "STUTTER/SPIKE COUNTING / OFF";
+        DashboardAnomalyTrackingButton.Foreground = (Brush)FindResource(_anomalyTrackingEnabled ? "GreenBrush" : "AccentBrush");
+        DashboardAnomalyTrackingButton.BorderBrush = (Brush)FindResource(_anomalyTrackingEnabled ? "GreenBrush" : "AccentBrush");
+        DashboardAnomalyTrackingButton.Background = new SolidColorBrush(
+            _anomalyTrackingEnabled ? Color.FromRgb(23, 49, 34) : Color.FromRgb(49, 42, 23));
+        if (_dashboardMonitor.IsRunning)
+        {
+            DashboardStatusText.Text = _anomalyTrackingEnabled
+                ? "LIVE — frame-time stutter and CPU-spike recording enabled."
+                : "LIVE — stutter/spike recording paused; other metrics remain active.";
+        }
     }
 
     private void RefreshToolbarPanelStatus()
@@ -1439,7 +1559,9 @@ public partial class MainWindow : Window
         DashMemory.Text = $"{sample.SimulatorMemoryMb:N0} MB";
         DashSystemCpu.Text = $"SYSTEM CPU {sample.SystemCpuPercent:0.0}%";
         DashCpuName.Text = _cpuProfile?.Model ?? "CPU MODEL UNAVAILABLE";
-        DashboardStatusText.Text = "LIVE — " + sample.FrameSourceStatus;
+        DashboardStatusText.Text = _anomalyTrackingEnabled
+            ? "LIVE — " + sample.FrameSourceStatus
+            : "LIVE — stutter/spike recording paused; " + sample.FrameSourceStatus;
         DashCoreText.Text = ProcessorLoadSummarizer.Format(
             ProcessorLoadSummarizer.Summarize(_cpuProfile, sample.LogicalProcessorUsage));
 
@@ -1449,10 +1571,15 @@ public partial class MainWindow : Window
 
     private void UpdateDashboardCounterDisplay()
     {
-        DashboardStutterText.Text = $"FRAME-TIME STUTTERS: {_dashboardStutterCount}";
-        DashboardStutterText.Foreground = (Brush)FindResource(_dashboardStutterCount > 0 ? "RedBrush" : "GreenBrush");
-        DashboardCpuSpikeText.Text = $"CPU SPIKE SAMPLES: {_dashboardCpuSpikeCount}";
-        DashboardCpuSpikeText.Foreground = (Brush)FindResource(_dashboardCpuSpikeCount > 0 ? "RedBrush" : "GreenBrush");
+        var paused = _anomalyTrackingEnabled ? "" : "  /  PAUSED";
+        DashboardStutterText.Text = $"FRAME-TIME STUTTERS: {_dashboardStutterCount}{paused}";
+        DashboardStutterText.Foreground = (Brush)FindResource(!_anomalyTrackingEnabled
+            ? "AccentBrush"
+            : _dashboardStutterCount > 0 ? "RedBrush" : "GreenBrush");
+        DashboardCpuSpikeText.Text = $"CPU SPIKE SAMPLES: {_dashboardCpuSpikeCount}{paused}";
+        DashboardCpuSpikeText.Foreground = (Brush)FindResource(!_anomalyTrackingEnabled
+            ? "AccentBrush"
+            : _dashboardCpuSpikeCount > 0 ? "RedBrush" : "GreenBrush");
     }
 
     private void DashboardGraph_SizeChanged(object sender, SizeChangedEventArgs e) => RedrawDashboardGraphs();
@@ -2136,6 +2263,37 @@ public partial class MainWindow : Window
             .ToList();
     }
 
+    private List<CompanionApplicationRule> ReadCompanionApplications()
+    {
+        if (CompanionAppsGrid is not null)
+        {
+            CompanionAppsGrid.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Cell, true);
+            CompanionAppsGrid.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Row, true);
+        }
+        return _companionApplications
+            .Where(rule => !string.IsNullOrWhiteSpace(rule.ExecutablePath))
+            .Select(rule =>
+            {
+                var copy = CopyCompanionRule(rule);
+                copy.Name = copy.Name.Trim();
+                copy.ExecutablePath = copy.ExecutablePath.Trim().Trim('"');
+                copy.LaunchDelaySeconds = Math.Clamp(copy.LaunchDelaySeconds, 0, 300);
+                return copy;
+            })
+            .ToList();
+    }
+
+    private static CompanionApplicationRule CopyCompanionRule(CompanionApplicationRule rule) => new()
+    {
+        Enabled = rule.Enabled,
+        RunAsAdministrator = rule.RunAsAdministrator,
+        Name = rule.Name ?? "",
+        ExecutablePath = rule.ExecutablePath ?? "",
+        LaunchTiming = rule.LaunchTiming,
+        LaunchDelaySeconds = rule.LaunchDelaySeconds,
+        CleanupAction = rule.CleanupAction
+    };
+
     private static IEnumerable<string> SplitLines(string value) =>
         value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
@@ -2217,6 +2375,9 @@ public partial class MainWindow : Window
         TimeoutBox.IsEnabled = !running;
         CustomKillBox.IsEnabled = !running;
         CustomRestartBox.IsEnabled = !running;
+        CompanionAppsGrid.IsEnabled = !running;
+        AddCompanionAppButton.IsEnabled = !running;
+        RemoveCompanionAppButton.IsEnabled = !running;
         SaveCustomButton.IsEnabled = !running;
         ContentCreatorCheck.IsEnabled = !running;
         DashboardEnabledCheck.IsEnabled = !running;

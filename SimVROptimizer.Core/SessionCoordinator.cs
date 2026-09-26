@@ -8,18 +8,21 @@ public sealed class SessionCoordinator
     private readonly SimulatorLauncher _launcher;
     private readonly VrRuntimeLauncher? _vrRuntimeLauncher;
     private readonly IXboxSessionCleanup? _xboxSessionCleanup;
+    private readonly CompanionApplicationLauncher? _companionApplicationLauncher;
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
 
     public SessionCoordinator(
         TransactionalOptimizer optimizer,
         SimulatorLauncher launcher,
         VrRuntimeLauncher? vrRuntimeLauncher = null,
-        IXboxSessionCleanup? xboxSessionCleanup = null)
+        IXboxSessionCleanup? xboxSessionCleanup = null,
+        CompanionApplicationLauncher? companionApplicationLauncher = null)
     {
         _optimizer = optimizer;
         _launcher = launcher;
         _vrRuntimeLauncher = vrRuntimeLauncher;
         _xboxSessionCleanup = xboxSessionCleanup;
+        _companionApplicationLauncher = companionApplicationLauncher;
     }
 
     public event Action<string>? StatusChanged
@@ -30,6 +33,7 @@ public sealed class SessionCoordinator
             _launcher.StatusChanged += value;
             if (_vrRuntimeLauncher is not null) _vrRuntimeLauncher.StatusChanged += value;
             if (_xboxSessionCleanup is not null) _xboxSessionCleanup.StatusChanged += value;
+            if (_companionApplicationLauncher is not null) _companionApplicationLauncher.StatusChanged += value;
         }
         remove
         {
@@ -37,6 +41,7 @@ public sealed class SessionCoordinator
             _launcher.StatusChanged -= value;
             if (_vrRuntimeLauncher is not null) _vrRuntimeLauncher.StatusChanged -= value;
             if (_xboxSessionCleanup is not null) _xboxSessionCleanup.StatusChanged -= value;
+            if (_companionApplicationLauncher is not null) _companionApplicationLauncher.StatusChanged -= value;
         }
     }
 
@@ -57,6 +62,7 @@ public sealed class SessionCoordinator
         OptimizerOptions options,
         IReadOnlyList<RunningAppCandidate> applications,
         IReadOnlyList<ServiceCandidate> services,
+        IReadOnlyList<CompanionApplicationRule> companionApplications,
         CancellationToken cancellationToken)
     {
         if (!await _sessionGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
@@ -65,6 +71,7 @@ public sealed class SessionCoordinator
         IsRunning = true;
         Process? process = null;
         VrRuntimeSession? runtimeSession = null;
+        CompanionApplicationSession? companionSession = null;
         var simulatorExited = false;
         try
         {
@@ -77,12 +84,32 @@ public sealed class SessionCoordinator
             if (_vrRuntimeLauncher is not null)
                 runtimeSession = await _vrRuntimeLauncher.LaunchAsync(options.VrRuntime, cancellationToken).ConfigureAwait(false);
 
+            companionSession = new CompanionApplicationSession();
+            if (_companionApplicationLauncher is not null)
+                await _companionApplicationLauncher.LaunchAsync(companionApplications, CompanionLaunchTiming.BeforeSimulator,
+                    companionSession, options.DryRun, cancellationToken).ConfigureAwait(false);
+
             ReportProgress(SessionStage.Simulator, "SIMULATOR", $"Launching and monitoring {simulator.Name}.");
             process = await _launcher.LaunchAndWaitAsync(simulator, options, cancellationToken).ConfigureAwait(false);
             if (process is not null)
             {
                 SimulatorProcessChanged?.Invoke(process.Id);
+                if (_companionApplicationLauncher is not null)
+                    await _companionApplicationLauncher.LaunchAsync(companionApplications, CompanionLaunchTiming.AfterSimulatorStarts,
+                        companionSession, options.DryRun, cancellationToken).ConfigureAwait(false);
                 await _optimizer.VerifyOrReapplySessionPowerPlanAsync(cancellationToken).ConfigureAwait(false);
+                if (_companionApplicationLauncher is not null
+                    && companionApplications.Any(item => item.Enabled && item.LaunchTiming == CompanionLaunchTiming.ReadyToFly))
+                {
+                    var launchReadyApps = await _companionApplicationLauncher.WaitUntilReadyToFlyAsync(
+                        process,
+                        IsMicrosoftFlightSimulator(simulator),
+                        TimeSpan.FromSeconds(options.LaunchTimeoutSeconds),
+                        cancellationToken).ConfigureAwait(false);
+                    if (launchReadyApps)
+                        await _companionApplicationLauncher.LaunchAsync(companionApplications, CompanionLaunchTiming.ReadyToFly,
+                            companionSession, options.DryRun, cancellationToken).ConfigureAwait(false);
+                }
                 await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
                 simulatorExited = true;
             }
@@ -104,17 +131,28 @@ public sealed class SessionCoordinator
                 }
                 if (_vrRuntimeLauncher is not null)
                     await _vrRuntimeLauncher.RestoreAsync(runtimeSession, CancellationToken.None).ConfigureAwait(false);
+                if (_companionApplicationLauncher is not null)
+                    await _companionApplicationLauncher.CleanupAsync(companionSession, CancellationToken.None).ConfigureAwait(false);
                 await _optimizer.RestoreAsync(CancellationToken.None).ConfigureAwait(false);
             }
             finally
             {
                 SimulatorProcessChanged?.Invoke(null);
                 process?.Dispose();
+                companionSession?.Dispose();
                 IsRunning = false;
                 _sessionGate.Release();
             }
         }
     }
+
+    public Task RunAsync(
+        SimulatorDefinition simulator,
+        OptimizerOptions options,
+        IReadOnlyList<RunningAppCandidate> applications,
+        IReadOnlyList<ServiceCandidate> services,
+        CancellationToken cancellationToken) =>
+        RunAsync(simulator, options, applications, services, [], cancellationToken);
 
     public Task<RestorationReport> RestoreRecoveryAsync(CancellationToken cancellationToken = default) => _optimizer.RestoreAsync(cancellationToken);
 

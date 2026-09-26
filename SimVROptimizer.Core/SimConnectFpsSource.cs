@@ -6,6 +6,8 @@ namespace SimVROptimizer.Core;
 public sealed class SimConnectFpsSource : IAsyncDisposable
 {
     private const uint FrameEventId = 1;
+    private const uint FlightLoadedEventId = 2;
+    private const uint ReceiveIdEvent = 4;
     private const uint ReceiveIdEventFrame = 7;
     private readonly string _libraryPath;
     private readonly FileLogger _logger;
@@ -22,6 +24,7 @@ public sealed class SimConnectFpsSource : IAsyncDisposable
     }
 
     public event Action<double>? FpsReceived;
+    public event Action? FlightLoaded;
     public event Action<string>? StatusChanged;
 
     public void Start() => _worker ??= RunAsync(_cancellation.Token);
@@ -113,6 +116,9 @@ public sealed class SimConnectFpsSource : IAsyncDisposable
                 await _logger.WriteAsync($"SimConnect Frame subscription failed: HRESULT 0x{subscribeResult:X8}.", cancellationToken).ConfigureAwait(false);
                 return;
             }
+            var flightLoadedResult = subscribe(_connection, FlightLoadedEventId, "FlightLoaded");
+            if (flightLoadedResult < 0)
+                await _logger.WriteAsync($"SimConnect FlightLoaded subscription failed: HRESULT 0x{flightLoadedResult:X8}.", cancellationToken).ConfigureAwait(false);
             StatusChanged?.Invoke("MSFS visual FPS via SimConnect - waiting for first frame");
             await _logger.WriteAsync($"SimConnect FPS source connected using {_libraryPath}.", cancellationToken).ConfigureAwait(false);
 
@@ -124,6 +130,12 @@ public sealed class SimConnectFpsSource : IAsyncDisposable
                 {
                     receivedAny = true;
                     var receiveId = unchecked((uint)Marshal.ReadInt32(data, 8));
+                    if (receiveId == ReceiveIdEvent && dataSize >= 24)
+                    {
+                        var systemEvent = Marshal.PtrToStructure<SimConnectReceiveEvent>(data);
+                        if (systemEvent.EventId == FlightLoadedEventId) FlightLoaded?.Invoke();
+                        continue;
+                    }
                     if (receiveId != ReceiveIdEventFrame || dataSize < 32) continue;
                     var fps = Marshal.PtrToStructure<SimConnectReceiveEventFrame>(data).FrameRate;
                     if (!float.IsFinite(fps) || fps <= 0 || fps > 1000) continue;
@@ -169,6 +181,17 @@ public sealed class SimConnectFpsSource : IAsyncDisposable
             _library = IntPtr.Zero;
         }
         _cancellation.Dispose();
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SimConnectReceiveEvent
+    {
+        public uint Size;
+        public uint Version;
+        public uint ReceiveId;
+        public uint GroupId;
+        public uint EventId;
+        public uint Data;
     }
 
     [StructLayout(LayoutKind.Sequential)]

@@ -20,11 +20,13 @@ It scans the local PC, explains the likely MSFS impact of running applications a
 - Optional OpenXR Turbo frame-pacing layer, bundled with VR Auto-Optimizer and transactionally registered only for the flight session; OpenXR Toolkit is not required
 - Live five-stage Prepare, Optimize, VR Runtime, Simulator, and Restore pipeline
 - Live performance dashboard with simulator FPS, frame time, average and 1% low FPS, system/simulator CPU, compact processor-load summaries, MainThread timing, memory, spike detection, stutter detection, and optional CSV logging
+- One-click pause/resume control for frame-time stutter and CPU-spike recording, so simulator loading does not inflate flight counters or session history while all other live metrics continue updating
 - One-click privacy-scrubbed support package containing configuration, detected workloads, CPU/GPU/OpenXR details, driver versions, restoration results, performance history, logs, and recent telemetry
 - Safer workload controls with service dependency/dependent visibility, selection and pre-flight dependency warnings, application restart-command warnings, and an explicit Test Restart action
 - Automatic flight-session history with latest-versus-previous comparisons and FPS/1% low trend graphs, including MainThread time, stutters, CPU spikes, simulator version, GPU driver and profile-change markers
 - Movable MSFS 2024 in-simulator VR toolbar dashboard with the same live metrics, graphs, AMD CCD0/CCD1 load summaries, and spike/stutter counters over a loopback-only read-only connection
 - Persistent custom process kill rules; applications stopped for a flight remain closed during restoration
+- Profile-aware companion-app preloading for tools such as Active Sky, SayIntentions and REX Core Atmos, with before-start, after-process-start and SimConnect-confirmed Ready-to-Fly timing, per-app delays, optional administrator launch, duplicate prevention, and tracked post-flight cleanup
 - In-app custom-list instructions and non-saving examples for process names and optional restart paths
 - Automatic service and system-setting restoration through a transaction journal; each selected application can be set to **Leave Closed** or **Restart**, while OneDrive is always restored
 - After a completed flight, selecting **Close Report** closes the restoration report and VR Auto-Optimizer after final cleanup; manually opened reports remain report-only
@@ -136,7 +138,9 @@ The Dashboard's CPU summary, simulator thread, and memory readings work for stan
 
 Persistent Aggressive changes are written to the recovery journal before they are applied and restored in reverse order after the simulator exits. The 0.5 ms timer request is released and simulator power-throttling state is restored. DNS flushing and standby-list clearing are one-time operations rather than persistent settings; their caches naturally repopulate. NVIDIA persistence is supported and restored, but the driver-profile “Prefer maximum performance” setting is not forced because reliable per-profile restoration requires a dedicated NVIDIA NVAPI integration.
 
-The Custom Apps tab stores process names in `config.json`. Optional restart entries use `process=full executable path`; matching running processes appear as custom candidates on every scan.
+The **Custom Apps** tab has two separate roles. **Companion App Preload** stores external executable paths, launch timing and a delay applied before each app starts. Companion changes are stored when **Save Changes** is selected on the **Flight Profile** tab, then restored whenever that named profile is loaded or reapplied at startup. An app can start **Before Simulator**, **After Simulator Starts**, or **Ready to Fly**. For MSFS, Ready to Fly waits for the SimConnect `FlightLoaded` event and then applies the configured launch delay; if readiness cannot be confirmed, the profile's bounded launch timeout is used as a fallback. Select **Admin** when that companion must be started using Windows' administrator `runas` request. Apps that are already running are never duplicated. For cleanup, choose **Leave Running** or **Close On Session End**; automatic cleanup applies only to the process instance started by VR Auto-Optimizer and first requests a normal window close before terminating that tracked process if necessary. These rules are included in named profiles and survive the administrator handoff.
+
+The lower custom-app list stores process names in `config.json`; matching running processes appear as custom candidates on every scan so they can be closed during the flight. This close list is independent of companion preloading.
 
 ### Saved user profiles
 
@@ -184,6 +188,16 @@ The test runner has no third-party test framework dependency. It covers output p
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+## Release notes — 2.4.1
+
+- Added profile-owned companion-app preloading for Active Sky, SayIntentions, REX Core Atmos and other external applications.
+- Added **Before Simulator**, **After Simulator Starts** and SimConnect-confirmed **Ready to Fly** launch stages, with per-app launch delays and a bounded fallback.
+- Added direct executable selection, optional administrator launch, duplicate prevention, and **Leave Running** or **Close on Session End** cleanup for processes started by the optimizer.
+- Companion apps are saved through **Flight Profile → Save Changes** and restored with the active named profile at startup.
+- Added a dashboard switch to pause/resume frame-stutter and CPU-spike recording during loading without stopping other telemetry.
+- Simplified the Custom Apps interface by removing command-line Arguments and fixed its launch and cleanup dropdown controls.
+- Expanded automated validation to 59 passing tests.
 
 ## Release notes — 2.4.0
 

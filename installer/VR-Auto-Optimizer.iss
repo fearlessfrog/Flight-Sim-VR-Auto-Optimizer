@@ -1,8 +1,8 @@
 #ifndef AppVersion
-  #define AppVersion "2.4.0"
+  #define AppVersion "2.4.1"
 #endif
 #ifndef SourceDir
-  #define SourceDir "..\outputs\publish-2.4.0"
+  #define SourceDir "..\outputs\publish-2.4.1"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\outputs\release"

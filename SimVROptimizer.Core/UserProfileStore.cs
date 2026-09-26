@@ -28,6 +28,7 @@ public static class UserProfileStore
         config.SessionMode = saved.SessionMode;
         config.Options = Copy(saved.Options);
         config.CustomApplications = saved.CustomApplications.Select(Copy).ToList();
+        config.CompanionApplications = saved.CompanionApplications.Select(Copy).ToList();
         config.ApplicationSelections = Copy(saved.ApplicationSelections);
         config.ServiceSelections = Copy(saved.ServiceSelections);
         config.ApplicationAfterFlightActions = Copy(saved.ApplicationAfterFlightActions);
@@ -107,6 +108,7 @@ public static class UserProfileStore
         foreach (var property in typeof(OptimizerOptions).GetProperties().Where(property => property.CanRead))
             Add("Optimizer", Humanize(property.Name), property.GetValue(saved.Options), property.GetValue(current.Options));
         Add("Custom apps", "Rules", Rules(saved.CustomApplications), Rules(current.CustomApplications));
+        Add("Companion apps", "Preload rules", CompanionRules(saved.CompanionApplications), CompanionRules(current.CompanionApplications));
         AddDictionary("Applications", saved.ApplicationSelections, current.ApplicationSelections);
         AddDictionary("Services", saved.ServiceSelections, current.ServiceSelections);
         AddDictionary("After flight", saved.ApplicationAfterFlightActions, current.ApplicationAfterFlightActions);
@@ -142,6 +144,7 @@ public static class UserProfileStore
         SessionMode = pending.SessionMode,
         Options = Copy(pending.Options),
         CustomApplications = pending.CustomApplications.Select(Copy).ToList(),
+        CompanionApplications = pending.CompanionApplications.Select(Copy).ToList(),
         ApplicationSelections = Copy(current.ApplicationSelections),
         ServiceSelections = Copy(current.ServiceSelections),
         ApplicationAfterFlightActions = Copy(pending.ApplicationAfterFlightActions.Count > 0
@@ -158,6 +161,7 @@ public static class UserProfileStore
         SessionMode = config.SessionMode,
         Options = Copy(config.Options),
         CustomApplications = config.CustomApplications.Select(Copy).ToList(),
+        CompanionApplications = config.CompanionApplications.Select(Copy).ToList(),
         ApplicationSelections = Copy(config.ApplicationSelections),
         ServiceSelections = Copy(config.ServiceSelections),
         ApplicationAfterFlightActions = Copy(config.ApplicationAfterFlightActions),
@@ -203,6 +207,17 @@ public static class UserProfileStore
         RestartExecutablePath = source.RestartExecutablePath
     };
 
+    private static CompanionApplicationRule Copy(CompanionApplicationRule source) => new()
+    {
+        Enabled = source.Enabled,
+        RunAsAdministrator = source.RunAsAdministrator,
+        Name = source.Name,
+        ExecutablePath = source.ExecutablePath,
+        LaunchTiming = source.LaunchTiming,
+        LaunchDelaySeconds = source.LaunchDelaySeconds,
+        CleanupAction = source.CleanupAction
+    };
+
     private static SavedUserProfile Copy(SavedUserProfile source) => new()
     {
         Name = source.Name,
@@ -210,6 +225,7 @@ public static class UserProfileStore
         SessionMode = source.SessionMode,
         Options = Copy(source.Options),
         CustomApplications = source.CustomApplications.Select(Copy).ToList(),
+        CompanionApplications = source.CompanionApplications.Select(Copy).ToList(),
         ApplicationSelections = Copy(source.ApplicationSelections),
         ServiceSelections = Copy(source.ServiceSelections),
         ApplicationAfterFlightActions = Copy(source.ApplicationAfterFlightActions),
@@ -234,6 +250,10 @@ public static class UserProfileStore
 
     private static string Rules(IEnumerable<CustomApplicationRule> rules) => string.Join(" | ", rules
         .Select(rule => $"{rule.ProcessName}={rule.RestartExecutablePath}")
+        .OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
+
+    private static string CompanionRules(IEnumerable<CompanionApplicationRule> rules) => string.Join(" | ", rules
+        .Select(rule => $"{rule.Enabled}:{rule.RunAsAdministrator}:{rule.Name}:{rule.ExecutablePath}:{rule.LaunchTiming}:{rule.LaunchDelaySeconds}:{rule.CleanupAction}")
         .OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
 
     private static string Format(object? value) => value switch

@@ -38,6 +38,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Named user profiles", TestNamedUserProfilesAsync),
     ("Profiles survive administrator continuation", TestProfilesSurviveContinuationAsync),
     ("Persistent custom application rule", TestCustomApplicationRuleAsync),
+    ("Companion application preload rules", TestCompanionApplicationRulesAsync),
     ("Ten simulator configurations", TestSimulatorCatalogAsync),
     ("IL-2 Korea standalone launcher resolution", TestIl2KoreaLauncherResolutionAsync),
     ("MSFS 2024 FastLaunch plans", TestMsfs2024FastLaunchAsync),
@@ -852,6 +853,16 @@ static async Task TestNamedUserProfilesAsync()
             LaunchTimeoutSeconds = 240
         },
         CustomApplications = [new CustomApplicationRule { ProcessName = "ExampleTool", RestartExecutablePath = @"C:\Tools\ExampleTool.exe" }],
+        CompanionApplications =
+        [
+            new CompanionApplicationRule
+            {
+                Name = "Active Sky", ExecutablePath = @"C:\Tools\ActiveSky.exe",
+                RunAsAdministrator = true,
+                LaunchTiming = CompanionLaunchTiming.BeforeSimulator, LaunchDelaySeconds = 8,
+                CleanupAction = CompanionCleanupAction.CloseOnSessionEnd
+            }
+        ],
         ApplicationSelections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["OneDrive"] = true },
         ServiceSelections = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase) { ["SysMain"] = true },
         ApplicationAfterFlightActions = new Dictionary<string, ApplicationAfterFlightAction>(StringComparer.OrdinalIgnoreCase)
@@ -873,10 +884,13 @@ static async Task TestNamedUserProfilesAsync()
     config.Options.Profile = OptimizationProfile.Standard;
     config.ApplicationSelections["OneDrive"] = false;
     config.CustomApplications[0].ProcessName = "Changed";
+    config.CompanionApplications[0].Name = "Changed companion";
     Equal(OptimizationProfile.Aggressive, saved.Options.Profile);
     Equal(true, saved.ApplicationSelections["onedrive"]);
     Equal(ApplicationAfterFlightAction.Restart, saved.ApplicationAfterFlightActions["exampletool"]);
     Equal("ExampleTool", saved.CustomApplications[0].ProcessName);
+    Equal("Active Sky", saved.CompanionApplications[0].Name);
+    Equal(true, saved.CompanionApplications[0].RunAsAdministrator);
     Equal("Fenix A320", saved.Associations.Aircraft);
 
     var differences = UserProfileStore.Diff(config, saved, associations);
@@ -891,6 +905,7 @@ static async Task TestNamedUserProfilesAsync()
     True(config.Options.UseOpenXrTurboMode);
     Equal(true, config.ServiceSelections["sysmain"]);
     Equal(ApplicationAfterFlightAction.Restart, config.ApplicationAfterFlightActions["exampletool"]);
+    Equal(CompanionCleanupAction.CloseOnSessionEnd, config.CompanionApplications[0].CleanupAction);
 
     config.Options.LaunchTimeoutSeconds = 300;
     UserProfileStore.SaveOrReplace(config, "MSFS VR");
@@ -905,6 +920,8 @@ static async Task TestNamedUserProfilesAsync()
     Equal(1, loaded.SavedProfiles.Count);
     Equal(true, loaded.SavedProfiles[0].ApplicationSelections["onedrive"]);
     Equal(ApplicationAfterFlightAction.Restart, loaded.SavedProfiles[0].ApplicationAfterFlightActions["exampletool"]);
+    Equal(8, loaded.SavedProfiles[0].CompanionApplications[0].LaunchDelaySeconds);
+    Equal(true, loaded.SavedProfiles[0].CompanionApplications[0].RunAsAdministrator);
     var duplicate = UserProfileStore.Duplicate(loaded, "MSFS VR", "MSFS VR Copy");
     Equal("Fenix A320", duplicate.Associations.Aircraft);
     var renamed = UserProfileStore.Rename(loaded, "MSFS VR Copy", "Airliner VR");
@@ -951,6 +968,10 @@ static Task TestProfilesSurviveContinuationAsync()
         SessionMode = SessionMode.Manual,
         Options = new OptimizerOptions { Profile = OptimizationProfile.Standard },
         CustomApplications = [],
+        CompanionApplications =
+        [
+            new CompanionApplicationRule { Name = "REX", ExecutablePath = @"C:\Tools\Rex.exe", LaunchTiming = CompanionLaunchTiming.AfterSimulatorStarts }
+        ],
         ApplicationAfterFlightActions = new Dictionary<string, ApplicationAfterFlightAction>(StringComparer.OrdinalIgnoreCase)
         {
             ["ExampleTool"] = ApplicationAfterFlightAction.Restart
@@ -964,10 +985,47 @@ static Task TestProfilesSurviveContinuationAsync()
     Equal(true, continued.ServiceSelections["sysmain"]);
     Equal(ApplicationAfterFlightAction.Restart, continued.ApplicationAfterFlightActions["exampletool"]);
     Equal(OptimizationProfile.Standard, continued.Options.Profile);
+    Equal("REX", continued.CompanionApplications.Single().Name);
 
     current.SavedProfiles[0].Name = "Changed";
     Equal("MSFS VR", continued.SavedProfiles[0].Name);
     return Task.CompletedTask;
+}
+
+static async Task TestCompanionApplicationRulesAsync()
+{
+    var selectable = new CompanionApplicationRule();
+    selectable.SelectedLaunchTiming = "READY TO FLY";
+    selectable.SelectedCleanupAction = "CLOSE ON SESSION END";
+    Equal(CompanionLaunchTiming.ReadyToFly, selectable.LaunchTiming);
+    Equal(CompanionCleanupAction.CloseOnSessionEnd, selectable.CleanupAction);
+    Equal("READY TO FLY", selectable.SelectedLaunchTiming);
+    Equal("CLOSE ON SESSION END", selectable.SelectedCleanupAction);
+
+    var directory = Path.Combine(AppContext.BaseDirectory, "test-data", Guid.NewGuid().ToString("N"));
+    var logger = new FileLogger(Path.Combine(directory, "companion.log"));
+    var launcher = new CompanionApplicationLauncher(logger);
+    var messages = new List<string>();
+    launcher.StatusChanged += messages.Add;
+    using var session = new CompanionApplicationSession();
+    var rules = new[]
+    {
+        new CompanionApplicationRule
+        {
+            Name = "Missing companion", ExecutablePath = Path.Combine(directory, "missing.exe"),
+            LaunchTiming = CompanionLaunchTiming.BeforeSimulator, CleanupAction = CompanionCleanupAction.CloseOnSessionEnd
+        },
+        new CompanionApplicationRule
+        {
+            Enabled = false, Name = "Disabled companion", ExecutablePath = Path.Combine(directory, "disabled.exe"),
+            LaunchTiming = CompanionLaunchTiming.BeforeSimulator
+        }
+    };
+    await launcher.LaunchAsync(rules, CompanionLaunchTiming.BeforeSimulator, session, false, CancellationToken.None);
+    Equal(1, messages.Count);
+    True(messages[0].Contains("executable was not found", StringComparison.OrdinalIgnoreCase));
+    Equal(0, session.StartedProcessCount);
+    Directory.Delete(directory, true);
 }
 
 static Task TestApplicationAfterFlightChoicesAsync()
@@ -1393,17 +1451,24 @@ static async Task TestPerformanceMonitorSamplingAsync()
     var paths = new AppPaths(directory);
     paths.EnsureCreated();
     await using var monitor = new PerformanceDashboardMonitor(paths, new FileLogger(paths.LogFile));
+    True(monitor.AnomalyTrackingEnabled);
+    monitor.AnomalyTrackingEnabled = false;
+    True(!monitor.AnomalyTrackingEnabled);
     var completion = new TaskCompletionSource<PerformanceTelemetrySample>(TaskCreationOptions.RunContinuationsAsynchronously);
     monitor.SampleReady += sample => completion.TrySetResult(sample);
     using var current = System.Diagnostics.Process.GetCurrentProcess();
     await monitor.StartAsync(current.Id, false);
+    True(monitor.IsRunning);
     var finished = await Task.WhenAny(completion.Task, Task.Delay(TimeSpan.FromSeconds(5)));
     True(finished == completion.Task);
     var sample = await completion.Task;
     if (sample.LogicalProcessorUsage.Count == 0) throw new InvalidOperationException("CPU sampler returned no logical processors.");
     if (sample.MainThreadFrameTimeMs is < 0) throw new InvalidOperationException("Simulator main-thread frame-time reading was invalid.");
     if (sample.SimulatorMemoryMb <= 0) throw new InvalidOperationException("Simulator process memory reading was empty.");
+    True(!sample.CpuSpike);
+    True(!sample.Stutter);
     await monitor.StopAsync();
+    True(!monitor.IsRunning);
     Directory.Delete(directory, true);
 }
 

@@ -33,6 +33,7 @@ public sealed class PerformanceDashboardMonitor : IAsyncDisposable
     private int _simulatorProcessId;
     private string _simulatorProcessName = "";
     private string _simConnectUnavailableReason = "SimConnect FPS source was not available";
+    private volatile bool _anomalyTrackingEnabled = true;
 
     public PerformanceDashboardMonitor(AppPaths paths, FileLogger logger)
     {
@@ -41,6 +42,14 @@ public sealed class PerformanceDashboardMonitor : IAsyncDisposable
     }
 
     public event Action<PerformanceTelemetrySample>? SampleReady;
+
+    public bool AnomalyTrackingEnabled
+    {
+        get => _anomalyTrackingEnabled;
+        set => _anomalyTrackingEnabled = value;
+    }
+
+    public bool IsRunning => _samplingTask is not null;
 
     public async Task StartAsync(int processId, bool logCsv, CancellationToken cancellationToken = default)
     {
@@ -167,9 +176,12 @@ public sealed class PerformanceDashboardMonitor : IAsyncDisposable
                 var averageFps = _sessionFrameTimes.Count > 0 ? 1000d / _sessionFrameTimes.Average() : (double?)null;
                 var oneLow = CalculateOnePercentLow(_sessionFrameTimes);
                 var median = Median(_sessionFrameTimes.TakeLast(240).ToArray());
-                var stutter = currentFrame.HasValue && currentFrame.Value > Math.Max(33.3, median * 1.75);
+                var stutter = _anomalyTrackingEnabled
+                    && currentFrame.HasValue
+                    && currentFrame.Value > Math.Max(33.3, median * 1.75);
                 var systemCpu = cores.Count == 0 ? 0 : cores.Average();
-                var cpuSpike = systemCpu >= 90 || cores.Any(value => value >= 98);
+                var cpuSpike = _anomalyTrackingEnabled
+                    && (systemCpu >= 90 || cores.Any(value => value >= 98));
                 var sample = new PerformanceTelemetrySample(
                     DateTimeOffset.Now, fps, averageFps, oneLow, currentFrame,
                     Math.Clamp(systemCpu, 0, 100), Math.Clamp(processCpu, 0, 100),

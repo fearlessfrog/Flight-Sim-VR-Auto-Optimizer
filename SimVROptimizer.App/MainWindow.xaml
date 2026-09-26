@@ -530,55 +530,60 @@
                 </ScrollViewer>
             </TabItem>
             <TabItem Header="CUSTOM APPS">
-                <Grid Background="#0C1214" Margin="16">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Border Background="#111A1D" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,12">
-                        <StackPanel>
-                            <TextBlock Text="HOW TO USE CUSTOM APPS" Style="{StaticResource InstrumentLabel}" />
-                            <TextBlock Text="Enter a running process name in the left box, one per line (.exe is optional), then select SAVE LISTS + RESCAN. Applications stopped for a flight remain closed during restoration. The saved-path box is retained for compatibility but automatic reopening is disabled." Foreground="{StaticResource MutedTextBrush}" FontFamily="Consolas" TextWrapping="Wrap" Margin="0,5,0,0" />
+                <ScrollViewer Background="#0C1214" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="16">
+                        <Border Background="#111A1D" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="10" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="COMPANION APP PRELOAD" Style="{StaticResource InstrumentLabel}" />
+                                <TextBlock Text="Launch Active Sky, SayIntentions, REX Core Atmos or another companion automatically with the flight session. Companion changes are stored with the selected flight profile when you choose FLIGHT PROFILE → SAVE CHANGES. Apps already running are not duplicated, and only apps started by VR Auto-Optimizer are eligible for automatic cleanup." Foreground="{StaticResource MutedTextBrush}" FontFamily="Consolas" TextWrapping="Wrap" Margin="0,5,0,0" />
+                            </StackPanel>
+                        </Border>
+                        <DataGrid x:Name="CompanionAppsGrid" Height="245" AutoGenerateColumns="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                                  SelectionMode="Single" CellEditEnding="CompanionAppsGrid_CellEditEnding"
+                                  Background="#0C1214" RowBackground="#0C1214" AlternatingRowBackground="#111A1D"
+                                  GridLinesVisibility="Horizontal" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                            <DataGrid.Columns>
+                                <DataGridCheckBoxColumn Header="ON" Binding="{Binding Enabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="45" />
+                                <DataGridCheckBoxColumn Header="ADMIN" Binding="{Binding RunAsAdministrator, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="62" />
+                                <DataGridTextColumn Header="NAME" Binding="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="130" />
+                                <DataGridTextColumn Header="EXECUTABLE" Binding="{Binding ExecutablePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="2.2*" />
+                                <DataGridTemplateColumn Header="START" Width="180">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox ItemsSource="{Binding AvailableLaunchTimings}" SelectedItem="{Binding SelectedLaunchTiming, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      SelectionChanged="CompanionOption_SelectionChanged" Padding="6,2" MinHeight="25" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                                <DataGridTextColumn Header="LAUNCH DELAY / SEC" Binding="{Binding LaunchDelaySeconds, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="125" />
+                                <DataGridTemplateColumn Header="AFTER FLIGHT" Width="180">
+                                    <DataGridTemplateColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox ItemsSource="{Binding AvailableCleanupActions}" SelectedItem="{Binding SelectedCleanupAction, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                      SelectionChanged="CompanionOption_SelectionChanged" Padding="6,2" MinHeight="25" />
+                                        </DataTemplate>
+                                    </DataGridTemplateColumn.CellTemplate>
+                                </DataGridTemplateColumn>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                        <DockPanel Margin="0,9,0,16" LastChildFill="True">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="14,0,0,0">
+                                <Button x:Name="AddCompanionAppButton" Content="SELECT APP / EXE" Click="AddCompanionAppButton_Click" Background="#233137" Foreground="{StaticResource GreenBrush}" />
+                                <Button x:Name="RemoveCompanionAppButton" Content="REMOVE" Click="RemoveCompanionAppButton_Click" Background="#3A2424" Foreground="#FFB4AE" BorderBrush="{StaticResource RedBrush}" />
+                            </StackPanel>
+                            <TextBlock Text="Launch delay is applied after the selected trigger and before starting that app (0–300 seconds). READY TO FLY uses MSFS SimConnect FlightLoaded with a bounded fallback. CLOSE ON SESSION END first requests a normal app exit."
+                                       Foreground="{StaticResource MutedTextBrush}" FontFamily="Consolas" TextWrapping="Wrap" VerticalAlignment="Center" />
+                        </DockPanel>
+                        <TextBlock Text="APPS TO CLOSE DURING THE FLIGHT" Style="{StaticResource InstrumentLabel}" />
+                        <TextBlock Text="Enter a running process name, one per line (.exe is optional). These are separate from companion apps launched above." Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,7" />
+                        <TextBox x:Name="CustomKillBox" Height="150" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Padding="9" TextWrapping="NoWrap" TextChanged="ProfileSetting_Changed"
+                                 ToolTip="Enter one process name per line. You may include or omit .exe." />
+                        <TextBox x:Name="CustomRestartBox" Height="0" Visibility="Collapsed" IsReadOnly="True" IsEnabled="False" />
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                            <Button x:Name="SaveCustomButton" Content="SAVE CLOSE LIST + RESCAN" Click="SaveCustomButton_Click" Background="#233137" Foreground="{StaticResource AccentBrush}" />
                         </StackPanel>
-                    </Border>
-                    <Grid Grid.Row="1">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <StackPanel>
-                            <TextBlock Text="1 / APPS TO CLOSE" Style="{StaticResource InstrumentLabel}" />
-                            <TextBlock Text="Process name only. Find it in Task Manager → Details." Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,7" />
-                            <Grid>
-                                <TextBox x:Name="CustomKillBox" Height="300" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontFamily="Consolas" Padding="9" TextWrapping="NoWrap" TextChanged="ProfileSetting_Changed"
-                                         ToolTip="Enter one process name per line. You may include or omit .exe." />
-                                <TextBlock IsHitTestVisible="False" Margin="10" FontFamily="Consolas" Foreground="#60706D" TextWrapping="Wrap"
-                                           Text="EXAMPLE — not saved&#x0a;&#x0a;CCleaner64&#x0a;OneDrive">
-                                    <TextBlock.Style>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                            <Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=CustomKillBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers>
-                                        </Style>
-                                    </TextBlock.Style>
-                                </TextBlock>
-                            </Grid>
-                        </StackPanel>
-                        <StackPanel Grid.Column="2">
-                            <TextBlock Text="2 / SAVED PATH (REOPENING DISABLED)" Style="{StaticResource InstrumentLabel}" />
-                            <TextBlock Text="Kept for compatibility. Apps now remain closed after restoration." Foreground="{StaticResource MutedTextBrush}" Margin="0,3,0,7" />
-                            <Grid>
-                                <TextBox x:Name="CustomRestartBox" Height="300" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" Padding="9" TextWrapping="NoWrap" TextChanged="ProfileSetting_Changed"
-                                         IsReadOnly="True" IsEnabled="False" ToolTip="Automatic application reopening is disabled. Applications remain closed after the flight." />
-                                <TextBlock IsHitTestVisible="False" Margin="10" FontFamily="Consolas" Foreground="#60706D" TextWrapping="Wrap"
-                                           Text="EXAMPLE — not saved&#x0a;&#x0a;CCleaner64=C:\Program Files\CCleaner\CCleaner64.exe&#x0a;&#x0a;OneDrive=%LOCALAPPDATA%\Microsoft\OneDrive\OneDrive.exe">
-                                    <TextBlock.Style>
-                                        <Style TargetType="TextBlock">
-                                            <Setter Property="Visibility" Value="Collapsed" />
-                                            <Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=CustomRestartBox}" Value=""><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers>
-                                        </Style>
-                                    </TextBlock.Style>
-                                </TextBlock>
-                            </Grid>
-                        </StackPanel>
-                    </Grid>
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-                        <Button x:Name="SaveCustomButton" Content="SAVE LISTS + RESCAN" Click="SaveCustomButton_Click" Background="#233137" Foreground="{StaticResource AccentBrush}" />
                     </StackPanel>
-                </Grid>
+                </ScrollViewer>
             </TabItem>
             <TabItem x:Name="DiagnosticsTab" Header="DIAGNOSTICS">
                 <ScrollViewer x:Name="DiagnosticsScroll" Background="#0C1214" VerticalScrollBarVisibility="Auto">
@@ -717,6 +722,10 @@
                                     <TextBlock x:Name="DashboardStatusText" Text="STANDBY — monitoring starts when the simulator process is detected." Foreground="{StaticResource MutedTextBrush}" FontFamily="Consolas" Margin="0,5,0,0" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                    <Button x:Name="DashboardAnomalyTrackingButton" Content="STUTTER/SPIKE COUNTING / ON"
+                                            Click="DashboardAnomalyTrackingButton_Click" Padding="12,6" Margin="0,0,12,0"
+                                            Background="#173122" BorderBrush="{StaticResource GreenBrush}" Foreground="{StaticResource GreenBrush}"
+                                            ToolTip="Pause both frame-time stutter and CPU-spike recording while the simulator is loading. FPS, CPU, MainThread, memory and graphs continue updating." />
                                     <CheckBox x:Name="DashboardCsvCheck" Content="SAVE CSV" Checked="ProfileSetting_Changed" Unchecked="ProfileSetting_Changed" />
                                 </StackPanel>
                             </DockPanel>

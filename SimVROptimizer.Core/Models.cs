@@ -495,6 +495,7 @@ public sealed class AppConfig
     public SessionMode SessionMode { get; set; } = SessionMode.Manual;
     public OptimizerOptions Options { get; set; } = new();
     public List<CustomApplicationRule> CustomApplications { get; set; } = [];
+    public List<CompanionApplicationRule> CompanionApplications { get; set; } = [];
     public Dictionary<string, bool> ApplicationSelections
     {
         get => _applicationSelections;
@@ -525,6 +526,7 @@ public sealed class SavedUserProfile
     public SessionMode SessionMode { get; set; } = SessionMode.Manual;
     public OptimizerOptions Options { get; set; } = new();
     public List<CustomApplicationRule> CustomApplications { get; set; } = [];
+    public List<CompanionApplicationRule> CompanionApplications { get; set; } = [];
     public Dictionary<string, bool> ApplicationSelections
     {
         get => _applicationSelections;
@@ -566,6 +568,65 @@ public sealed class CustomApplicationRule
     public string RestartExecutablePath { get; set; } = "";
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum CompanionLaunchTiming
+{
+    BeforeSimulator,
+    AfterSimulatorStarts,
+    ReadyToFly
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum CompanionCleanupAction
+{
+    LeaveRunning,
+    CloseOnSessionEnd
+}
+
+public sealed class CompanionApplicationRule
+{
+    private static readonly IReadOnlyList<string> LaunchOptions = ["BEFORE SIMULATOR", "AFTER SIMULATOR STARTS", "READY TO FLY"];
+    private static readonly IReadOnlyList<string> CleanupOptions = ["LEAVE RUNNING", "CLOSE ON SESSION END"];
+
+    public bool Enabled { get; set; } = true;
+    public bool RunAsAdministrator { get; set; }
+    public string Name { get; set; } = "";
+    public string ExecutablePath { get; set; } = "";
+    public CompanionLaunchTiming LaunchTiming { get; set; } = CompanionLaunchTiming.BeforeSimulator;
+    public int LaunchDelaySeconds { get; set; }
+    public CompanionCleanupAction CleanupAction { get; set; } = CompanionCleanupAction.LeaveRunning;
+    public string LaunchTimingLabel => LaunchTiming switch
+    {
+        CompanionLaunchTiming.BeforeSimulator => "BEFORE SIMULATOR",
+        CompanionLaunchTiming.AfterSimulatorStarts => "AFTER SIMULATOR STARTS",
+        _ => "READY TO FLY"
+    };
+    public string CleanupActionLabel => CleanupAction == CompanionCleanupAction.LeaveRunning ? "LEAVE RUNNING" : "CLOSE ON SESSION END";
+    [JsonIgnore]
+    public IReadOnlyList<string> AvailableLaunchTimings => LaunchOptions;
+    [JsonIgnore]
+    public IReadOnlyList<string> AvailableCleanupActions => CleanupOptions;
+    [JsonIgnore]
+    public string SelectedLaunchTiming
+    {
+        get => LaunchTimingLabel;
+        set => LaunchTiming = value switch
+        {
+            "AFTER SIMULATOR STARTS" => CompanionLaunchTiming.AfterSimulatorStarts,
+            "READY TO FLY" => CompanionLaunchTiming.ReadyToFly,
+            _ => CompanionLaunchTiming.BeforeSimulator
+        };
+    }
+    [JsonIgnore]
+    public string SelectedCleanupAction
+    {
+        get => CleanupActionLabel;
+        set => CleanupAction = value == "CLOSE ON SESSION END"
+            ? CompanionCleanupAction.CloseOnSessionEnd
+            : CompanionCleanupAction.LeaveRunning;
+    }
+}
+
 public sealed class PendingLaunch
 {
     private Dictionary<string, ApplicationAfterFlightAction> _applicationAfterFlightActions = new(StringComparer.OrdinalIgnoreCase);
@@ -576,6 +637,7 @@ public sealed class PendingLaunch
     public IReadOnlyList<string> ProcessNames { get; init; } = [];
     public IReadOnlyList<string> ServiceNames { get; init; } = [];
     public IReadOnlyList<CustomApplicationRule> CustomApplications { get; init; } = [];
+    public IReadOnlyList<CompanionApplicationRule> CompanionApplications { get; init; } = [];
     public Dictionary<string, ApplicationAfterFlightAction> ApplicationAfterFlightActions
     {
         get => _applicationAfterFlightActions;
